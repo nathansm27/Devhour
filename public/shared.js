@@ -70,7 +70,7 @@ window.DH = (function () {
     return Math.round(100 * ratios.reduce(function (a, b) { return a + b; }, 0) / ratios.length);
   }
 
-  // Score for one person over one session, or every session ("all").
+  // Score for one person over one session, or every session ("all"), counting only metrics with a goal.
   // Returns { lines: [{metricId, value, goal}], pct, sessions } or null when nothing is logged.
   function score(m, pid, sid) {
     var ids = sid === "all" ? m.asc.map(function (s) { return s.id; }) : [sid];
@@ -78,8 +78,11 @@ window.DH = (function () {
     ids.forEach(function (id) {
       var e = entry(m, id, pid);
       if (!e) return;
+      // Numbers logged against a goal of zero don't count and aren't shown.
+      var counted = Object.keys(e).filter(function (mid) { return e[mid].goal > 0; });
+      if (!counted.length) return;
       n++;
-      Object.keys(e).forEach(function (mid) {
+      counted.forEach(function (mid) {
         var a = agg[mid] || (agg[mid] = { metricId: mid, value: 0, goal: 0 });
         a.value += e[mid].value; a.goal += e[mid].goal;
       });
@@ -95,7 +98,7 @@ window.DH = (function () {
       var xp = x.s.pct == null ? -1 : x.s.pct, yp = y.s.pct == null ? -1 : y.s.pct;
       return (yp - xp) || x.p.name.localeCompare(y.p.name);
     });
-    var absent = rows.filter(function (r) { return !r.s && r.p.active && r.p.metrics.length; }).map(function (r) { return r.p; });
+    var absent = rows.filter(function (r) { return !r.s && r.p.active && r.p.metrics.some(function (a) { return a.goal > 0; }); }).map(function (r) { return r.p; });
     return { logged: logged, absent: absent };
   }
 

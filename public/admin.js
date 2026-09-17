@@ -147,7 +147,7 @@
   }
 
   function resultsPanel() {
-    var h = '<section class="panel"><h2>Log results</h2><p class="hint">Numbers save as you type. Leave a box blank if it doesn\u2019t apply.</p>';
+    var h = '<section class="panel"><h2>Log results</h2><p class="hint">Numbers save as you type. Leave a box blank if it doesn\u2019t apply. Metrics with no goal aren\u2019t shown on the leaderboard.</p>';
     h += '<div class="bar">';
     if (m.desc.length) {
       h += '<label for="sessionSel" class="sr">Session</label><select class="field grow" id="sessionSel">' + m.desc.map(function (s) {
@@ -176,7 +176,7 @@
         var val = e[mid] ? e[mid].value : null;
         var goal = e[mid] ? e[mid].goal : assignedGoal(p, mid);
         h += '<label class="line"><span class="ln">' + dot(mid) + '<span class="pn-t">' + esc(D.metricName(m, mid)) + "</span></span>" +
-          '<span class="lg">' + (goal ? "/ " + goal : "") + "</span>" +
+          '<span class="lg"' + (goal ? ">/ " + goal : ' title="Set a goal in Team to show this on the leaderboard">no goal') + "</span>" +
           numInput('id="e-' + p.id + "-" + mid + '" data-entry="' + p.id + '" data-metric="' + mid + '"', val, p.name + " " + D.metricName(m, mid)) + "</label>";
       });
       h += "</div>";
