@@ -15,6 +15,15 @@
 @media (min-width: 981px) and (max-width: 1240px) { .shell { margin: 20px; } }
 .head { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
 .head h1 { font-size: clamp(1.125rem, 3vw, 1.625rem); }
+.teamtabs { display: flex; gap: 6px; margin-top: 18px; overflow-x: auto; scrollbar-width: none; }
+.teamtabs[hidden] { display: none; }
+.teamtabs::-webkit-scrollbar { display: none; }
+.teamtabs a {
+  flex: none; padding: 8px 16px; border-radius: 10px; text-decoration: none;
+  color: var(--muted); font-weight: 600; font-size: .875rem; border: 1px solid var(--line);
+}
+.teamtabs a:hover { color: var(--ink); border-color: var(--line-strong); }
+.teamtabs a[aria-current="page"] { color: #fff; border-color: #7C88F5; background: linear-gradient(180deg, #7582F2, #5561DA); box-shadow: 0 8px 20px -12px rgba(95, 108, 227, .9); }
 
 /* ---------- podium ---------- */
 .podium {

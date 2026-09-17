@@ -139,6 +139,9 @@ window.DH = (function () {
     var headers = { "content-type": "application/json" };
     if (opts.token) headers.authorization = "Bearer " + opts.token;
     var url = "/api/router?path=" + encodeURIComponent(path.replace(/^\/api\//, ""));
+    if (opts.query) Object.keys(opts.query).forEach(function (k) {
+      if (opts.query[k] != null && opts.query[k] !== "") url += "&" + encodeURIComponent(k) + "=" + encodeURIComponent(opts.query[k]);
+    });
     return fetch(url, {
       method: opts.method || "GET",
       headers: headers,

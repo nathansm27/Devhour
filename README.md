@@ -1,6 +1,10 @@
 # Development hour tracker
 
-A public leaderboard (`/`) and a password-protected admin page (`/admin`) for tracking each person's own metrics and goals every development hour. It runs on Vercel, with results stored in a Postgres database (Neon).
+Team leaderboards and a password-protected admin page (`/admin`) for tracking each person's own metrics and goals every development hour.
+
+- **Recruitment:** `/` (the first team)
+- **Admin:** `/?team=admin`
+- **Other teams:** `/?team=<team-link-name>`. The admin page's Settings panel shows each team's link. It runs on Vercel, with results stored in a Postgres database (Neon).
 
 ## Put it live on Vercel
 
@@ -42,6 +46,7 @@ The database tables are created automatically on the first request.
 
 ## How it works
 
+- **Teams:** each team has its own people, metrics and sessions, and they're managed from the same admin page using the team tabs. Renaming a team keeps its link.
 - **Metrics:** create any metrics you like in admin (Metrics panel), then give each person the ones that apply, with their own goal per session.
 - **Scoring:** each score averages that person's metrics against their goals, each capped at 200%, so people tracking different things can share one leaderboard.
 - **Goals and history:** goals are copied onto each number when it's first logged, so changing a goal later doesn't rewrite past sessions. "Use current goals" re-applies everyone's current goals to one session.

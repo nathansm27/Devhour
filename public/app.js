@@ -4,6 +4,7 @@
   var REFRESH_MS = 30000;
 
   var m = null, lastJSON = "", sel = null, openId = null, intro = true, lastOk = 0, failed = false;
+  var teamParam = new URLSearchParams(location.search).get("team") || "";
   var $ = function (id) { return document.getElementById(id); };
 
   var ICON = {
@@ -19,13 +20,21 @@
 
   // ---------- data ----------
   function load() {
-    return D.api("/api/data").then(function (data) {
+    return D.api("/api/data", { query: { team: teamParam } }).then(function (data) {
       lastOk = Date.now(); failed = false;
       var copy = Object.assign({}, data); delete copy.updatedAt;
       var j = JSON.stringify(copy);
       if (j !== lastJSON) { lastJSON = j; m = D.model(data); render(); }
       updateLive();
-    }, function () {
+    }, function (err) {
+      if (err.status === 404 && !m) {
+        lastOk = Date.now();
+        $("main").innerHTML = emptyHTML("Team not found", "This link doesn\u2019t match a team. Check the link or open the main leaderboard.") +
+          '<p style="text-align:center;margin-top:16px"><a class="btn" href="/">Open the leaderboard</a></p>';
+        $("side").innerHTML = "";
+        updateLive();
+        return;
+      }
       failed = true; updateLive();
       if (!m) {
         $("main").innerHTML = emptyHTML("Can\u2019t load results", "Check your connection. The page will try again shortly.");
@@ -70,8 +79,14 @@
 
   // ---------- render ----------
   function render() {
-    document.title = m.data.title;
+    document.title = m.data.team.name + " \u2013 " + m.data.title;
     $("title").textContent = m.data.title;
+    var teams = m.data.teams || [];
+    $("teams").hidden = teams.length < 2;
+    $("teams").innerHTML = teams.map(function (t, i) {
+      var href = i === 0 ? "/" : "/?team=" + encodeURIComponent(t.slug);
+      return '<a href="' + href + '"' + (t.id === m.data.team.id ? ' aria-current="page"' : "") + ">" + esc(t.name) + "</a>";
+    }).join("");
     sel = readHash();
 
     if (!m.people.length || !m.desc.length) {

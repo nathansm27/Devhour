@@ -7,6 +7,9 @@
   var token = null;
   try { token = localStorage.getItem(TOKEN_KEY); } catch (e) {}
   var data = null, m = null, cur = null;
+  var TEAM_KEY = "devhour-admin-team";
+  var teamSlug = new URLSearchParams(location.search).get("team") || "";
+  if (!teamSlug) { try { teamSlug = localStorage.getItem(TEAM_KEY) || ""; } catch (e) {} }
   var waiting = {}, inflight = [], pending = 0, errored = false;
 
   var ICON = {
@@ -93,8 +96,19 @@
   // ---------- data ----------
   function reload() {
     flush();
-    return Promise.all(inflight).then(function () { return D.api("/api/data"); }).then(function (d) {
+    return Promise.all(inflight).then(function () {
+      return D.api("/api/data", { query: { team: teamSlug } }).catch(function (err) {
+        if (err.status !== 404 || !teamSlug) throw err;
+        teamSlug = ""; // saved team no longer exists: fall back to the first team
+        return D.api("/api/data");
+      });
+    }).then(function (d) {
+      if (data && data.team.id !== d.team.id) cur = null;
       data = d; m = D.model(d);
+      teamSlug = d.team.slug;
+      try { localStorage.setItem(TEAM_KEY, teamSlug); } catch (e) {}
+      var q = d.teams.length && d.teams[0].id === d.team.id ? "" : "?team=" + encodeURIComponent(teamSlug);
+      if (location.search !== q) history.replaceState(null, "", location.pathname + q);
       if (!cur || !m.desc.some(function (s) { return s.id === cur; })) cur = m.desc.length ? m.desc[0].id : null;
       render();
     });
@@ -108,6 +122,10 @@
   }
 
   // ---------- helpers ----------
+  function boardLink(absolute) {
+    var first = data.teams.length && data.teams[0].id === data.team.id;
+    return (absolute ? location.origin : "") + "/" + (first ? "" : "?team=" + encodeURIComponent(data.team.slug));
+  }
   function dot(id) { return '<i class="dot" style="background:' + D.metricColor(m, id) + '"></i>'; }
   function numInput(attrs, value, label, placeholder) {
     return '<input class="field" type="number" inputmode="numeric" min="0" step="1" ' + attrs + ' aria-label="' + esc(label) + '" value="' +
@@ -139,8 +157,13 @@
     document.title = data.title + " admin";
     var h = '<div class="wrap"><header class="topbar"><div class="brand"><span class="mark admin" aria-hidden="true">' + ICON.mark +
       '</span><h1>' + esc(data.title) + ' <span class="tag">Admin</span></h1></div><div class="actions">' +
-      '<a class="btn" href="/" target="_blank" rel="noopener">Leaderboard</a>' +
+      '<a class="btn" href="' + boardLink(false) + '" target="_blank" rel="noopener">Leaderboard</a>' +
       '<button class="btn quiet" data-act="signout">Sign out</button></div></header>';
+    if (data.teams.length > 1) {
+      h += '<nav class="teamtabs" aria-label="Teams">' + data.teams.map(function (t) {
+        return '<button data-act="team" data-slug="' + esc(t.slug) + '"' + (t.id === data.team.id ? ' aria-current="page"' : "") + ">" + esc(t.name) + "</button>";
+      }).join("") + "</nav>";
+    }
     h += resultsPanel() + metricsPanel() + teamPanel() + settingsPanel() + "</div>";
     root.innerHTML = h;
     if (focus) { var el = document.getElementById(focus); if (el) el.focus(); }
@@ -185,7 +208,7 @@
   }
 
   function metricsPanel() {
-    var h = '<section class="panel"><h2>Metrics</h2><p class="hint">Your list of things to track. Give them to people in Team below.</p>';
+    var h = '<section class="panel"><h2>Metrics</h2><p class="hint">This team\u2019s list of things to track. The default goal is used when you give a metric to someone new.</p>';
     if (m.metrics.length) {
       h += '<div class="mlist">';
       m.metrics.forEach(function (x) {
@@ -193,6 +216,7 @@
         h += '<div class="mitem">' + dot(x.id) +
           '<input class="field" type="text" maxlength="40" id="mn-' + x.id + '" data-mname="' + x.id + '" aria-label="Metric name" value="' + esc(x.name) + '">' +
           '<span class="mcount">' + users + (users === 1 ? " person" : " people") + "</span>" +
+          '<label class="mdef"><span>Goal</span>' + numInput('id="md-' + x.id + '" data-mdef="' + x.id + '"', x.defaultGoal || 0, x.name + " default goal") + "</label>" +
           '<button class="iconbtn" data-act="del-metric" data-id="' + x.id + '" aria-label="Delete ' + esc(x.name) + '" title="Delete">' + ICON.trash + "</button></div>";
       });
       h += "</div>";
@@ -201,8 +225,8 @@
     }
     h += '<form class="addrow" id="metricForm"><div class="bar" style="margin:0">' +
       '<input class="field grow" type="text" maxlength="40" id="newMetric" placeholder="New metric name" aria-label="New metric name" required>' +
-      '<label class="chk"><input type="checkbox" id="newMetricAll" checked> Give to everyone, goal</label>' +
-      '<input class="field goalin" type="number" inputmode="numeric" min="0" step="1" id="newMetricGoal" placeholder="0" aria-label="Goal for everyone">' +
+      '<input class="field goalin" type="number" inputmode="numeric" min="0" step="1" id="newMetricGoal" placeholder="Goal" aria-label="Default goal">' +
+      '<label class="chk"><input type="checkbox" id="newMetricAll" checked> Give to everyone now</label>' +
       '<button class="btn" type="submit">Add metric</button></div></form>';
     return h + "</section>";
   }
@@ -226,7 +250,7 @@
         var free = m.metrics.filter(function (x) { return assignedGoal(p, x.id) === null; });
         if (free.length) {
           h += '<div class="assign"><select class="field" id="as-' + p.id + '" aria-label="Metric to add"><option value="">Add a metric\u2026</option>' +
-            free.map(function (x) { return '<option value="' + x.id + '">' + esc(x.name) + "</option>"; }).join("") + "</select>" +
+            free.map(function (x) { return '<option value="' + x.id + '" data-def="' + (x.defaultGoal || 0) + '">' + esc(x.name) + "</option>"; }).join("") + "</select>" +
             '<input class="field goalin" type="number" inputmode="numeric" min="0" step="1" id="ag-' + p.id + '" placeholder="Goal" aria-label="Goal">' +
             '<button class="btn" data-act="assign" data-id="' + p.id + '">Add</button></div>';
         }
@@ -239,11 +263,11 @@
 
     h += '<form class="addrow" id="addForm"><div class="bar" style="margin:0">' +
       '<input class="field grow" type="text" maxlength="60" id="newName" placeholder="New person\u2019s name" aria-label="New person\u2019s name" required>';
-    if (active.some(function (p) { return p.metrics.length; })) {
-      h += '<select class="field" id="copyFrom" aria-label="Copy metrics from"><option value="">No metrics to start</option>' +
+    if (m.metrics.length) {
+      h += '<select class="field" id="copyFrom" aria-label="Starting metrics"><option value="all">All ' + m.metrics.length + " metrics (default goals)</option>" +
         active.filter(function (p) { return p.metrics.length; }).map(function (p) {
-          return '<option value="' + p.id + '">Same metrics as ' + esc(p.name) + "</option>";
-        }).join("") + "</select>";
+          return '<option value="' + p.id + '">Same as ' + esc(p.name) + "</option>";
+        }).join("") + '<option value="">No metrics yet</option></select>';
     }
     h += '<button class="btn" type="submit">Add person</button></div></form>';
 
@@ -260,8 +284,16 @@
   }
 
   function settingsPanel() {
-    return '<section class="panel"><h2>Settings</h2><p class="hint">The title shows at the top of the leaderboard.</p>' +
-      '<input class="field" style="width:100%" type="text" maxlength="80" id="title" aria-label="Leaderboard title" value="' + esc(data.title) + '"></section>';
+    return '<section class="panel"><h2>' + esc(data.team.name) + ' settings</h2><p class="hint">Each team has its own leaderboard link. Share this one with ' + esc(data.team.name) + '.</p>' +
+      '<div class="setrow"><label for="teamName">Team name</label><input class="field" type="text" maxlength="40" id="teamName" value="' + esc(data.team.name) + '"></div>' +
+      '<div class="setrow"><label for="teamLink">Leaderboard link</label><div class="linkrow"><input class="field" type="text" id="teamLink" readonly value="' + esc(boardLink(true)) + '">' +
+      '<button class="btn" data-act="copy-link">Copy</button></div></div>' +
+      '</section>' +
+      '<section class="panel"><h2>All teams</h2><p class="hint">The title shows at the top of every team\u2019s leaderboard.</p>' +
+      '<div class="setrow"><label for="title">Title</label><input class="field" type="text" maxlength="80" id="title" value="' + esc(data.title) + '"></div>' +
+      '<form class="addrow" id="teamForm"><div class="bar" style="margin:0">' +
+      '<input class="field grow" type="text" maxlength="40" id="newTeam" placeholder="New team name" aria-label="New team name" required>' +
+      '<button class="btn" type="submit">Add team</button></div></form></section>';
   }
 
   // ---------- local updates ----------
@@ -303,6 +335,13 @@
       debounce("g|" + pid + "|" + mid, function () {
         track(call("/api/admin/people/" + pid + "/metrics/" + mid, "PUT", { goal: goal })).catch(function () {});
       });
+    } else if (t.hasAttribute("data-mdef")) {
+      mid = t.getAttribute("data-mdef");
+      var dg = readInt(t.value) || 0;
+      m.metricById[mid].defaultGoal = dg;
+      debounce("md|" + mid, function () {
+        track(call("/api/admin/metrics/" + mid, "PATCH", { defaultGoal: dg })).catch(function () {});
+      });
     } else if (t.hasAttribute("data-name")) {
       pid = t.getAttribute("data-name");
       var name = t.value.trim();
@@ -318,6 +357,13 @@
       m.metricById[mid].name = mname;
       debounce("m|" + mid, function () {
         track(call("/api/admin/metrics/" + mid, "PATCH", { name: mname })).catch(function () {});
+      }, 700);
+    } else if (t.id === "teamName") {
+      var tname = t.value.trim();
+      if (!tname) return;
+      var tid = data.team.id;
+      debounce("team|" + tid, function () {
+        track(call("/api/admin/teams/" + tid, "PATCH", { name: tname })).catch(function () {});
       }, 700);
     } else if (t.id === "title") {
       var title = t.value;
@@ -335,6 +381,8 @@
     if (t.id === "sessionSel") { flush(); cur = t.value; render(); }
     else if (t.id === "sessionDate" && t.value) {
       track(call("/api/admin/sessions/" + cur, "PATCH", { date: t.value })).then(reload).catch(function () {});
+    } else if (t.id === "teamName") {
+      if (!t.value.trim()) t.value = data.team.name; else reload().catch(function () {});
     } else if (t.hasAttribute("data-name") || t.hasAttribute("data-mname")) {
       // Names changed: refresh labels elsewhere once saved.
       if (!t.value.trim()) {
@@ -342,8 +390,9 @@
       } else {
         reload().catch(function () {});
       }
-    } else if (t.id === "newMetricAll") {
-      document.getElementById("newMetricGoal").disabled = !t.checked;
+    } else if (t.id && t.id.indexOf("as-") === 0) {
+      var opt = t.options[t.selectedIndex], gi = document.getElementById("ag-" + t.id.slice(3));
+      if (gi) gi.placeholder = opt && opt.value ? opt.getAttribute("data-def") : "Goal";
     }
   });
 
@@ -354,8 +403,16 @@
       var name = document.getElementById("newName").value.trim();
       if (!name) return;
       var cf = document.getElementById("copyFrom");
-      track(call("/api/admin/people", "POST", { name: name, copyFrom: cf && cf.value ? cf.value : null }))
+      track(call("/api/admin/people", "POST", { teamId: data.team.id, name: name, copyFrom: cf && cf.value ? cf.value : null }))
         .then(reload).then(function () { var n = document.getElementById("newName"); if (n) n.focus(); })
+        .catch(function (err) { alert(err.message); });
+    } else if (id === "teamForm") {
+      e.preventDefault();
+      var tn = document.getElementById("newTeam").value.trim();
+      if (!tn) return;
+      track(call("/api/admin/teams", "POST", { name: tn }))
+        .then(function (t) { teamSlug = t.slug; return reload(); })
+        .then(function () { window.scrollTo(0, 0); })
         .catch(function (err) { alert(err.message); });
     } else if (id === "metricForm") {
       e.preventDefault();
@@ -363,7 +420,7 @@
       if (!mname) return;
       var all = document.getElementById("newMetricAll").checked;
       var goal = readInt(document.getElementById("newMetricGoal").value) || 0;
-      track(call("/api/admin/metrics", "POST", { name: mname, assignAll: all, goal: goal }))
+      track(call("/api/admin/metrics", "POST", { teamId: data.team.id, name: mname, assignAll: all, goal: goal }))
         .then(reload).then(function () { var n = document.getElementById("newMetric"); if (n) n.focus(); })
         .catch(function (err) { alert(err.message); });
     }
@@ -375,10 +432,22 @@
     var act = b.getAttribute("data-act"), id = b.getAttribute("data-id"), p = id && m && m.byId[id];
     var mid = b.getAttribute("data-metric");
     if (act === "retry") start();
+    else if (act === "team") {
+      var slug = b.getAttribute("data-slug");
+      if (slug === teamSlug) return;
+      flush();
+      teamSlug = slug;
+      reload().then(function () { window.scrollTo(0, 0); }).catch(function () {});
+    } else if (act === "copy-link") {
+      var link = document.getElementById("teamLink");
+      var done = function () { b.textContent = "Copied"; setTimeout(function () { b.textContent = "Copy"; }, 1500); };
+      if (navigator.clipboard) navigator.clipboard.writeText(link.value).then(done, function () { link.select(); });
+      else { link.select(); document.execCommand("copy"); done(); }
+    }
     else if (act === "signout") signOut();
     else if (act === "new-session") {
       flush();
-      track(call("/api/admin/sessions", "POST", { date: D.todayISO() })).then(function (s) { cur = s.id; return reload(); }).catch(function (err) { alert(err.message); });
+      track(call("/api/admin/sessions", "POST", { teamId: data.team.id, date: D.todayISO() })).then(function (s) { cur = s.id; return reload(); }).catch(function (err) { alert(err.message); });
     } else if (act === "del-session") {
       var s = m.desc.filter(function (x) { return x.id === cur; })[0];
       if (!confirm("Delete the " + D.fmtDate(s.date, true) + " session and all its results?")) return;
@@ -394,7 +463,8 @@
     } else if (act === "assign" && p) {
       var sel = document.getElementById("as-" + id);
       if (!sel || !sel.value) { sel && sel.focus(); return; }
-      var g = readInt(document.getElementById("ag-" + id).value) || 0;
+      var gRaw = readInt(document.getElementById("ag-" + id).value);
+      var g = gRaw === null ? Number(sel.options[sel.selectedIndex].getAttribute("data-def")) || 0 : gRaw;
       track(call("/api/admin/people/" + id + "/metrics/" + sel.value, "PUT", { goal: g })).then(reload).catch(function () {});
     } else if (act === "unassign" && p) {
       track(call("/api/admin/people/" + id + "/metrics/" + mid, "DELETE")).then(reload).catch(function () {});

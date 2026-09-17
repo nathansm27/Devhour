@@ -8,6 +8,13 @@ const TOKEN_DAYS = 30;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 const SCHEMA = `
+CREATE TABLE IF NOT EXISTS dh_teams (
+  id UUID PRIMARY KEY,
+  name TEXT NOT NULL,
+  slug TEXT NOT NULL UNIQUE,
+  seq BIGSERIAL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
 CREATE TABLE IF NOT EXISTS dh_settings (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL
@@ -49,7 +56,11 @@ CREATE TABLE IF NOT EXISTS dh_entries (
   goal INTEGER NOT NULL DEFAULT 0,
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   PRIMARY KEY (session_id, person_id, metric_id)
-);`;
+);
+ALTER TABLE dh_people ADD COLUMN IF NOT EXISTS team_id UUID REFERENCES dh_teams(id) ON DELETE CASCADE;
+ALTER TABLE dh_sessions ADD COLUMN IF NOT EXISTS team_id UUID REFERENCES dh_teams(id) ON DELETE CASCADE;
+ALTER TABLE dh_metrics ADD COLUMN IF NOT EXISTS team_id UUID REFERENCES dh_teams(id) ON DELETE CASCADE;
+ALTER TABLE dh_metrics ADD COLUMN IF NOT EXISTS default_goal INTEGER NOT NULL DEFAULT 0;`;
 
 class HttpError extends Error {
   constructor(status, message) { super(message); this.status = status; }
@@ -65,38 +76,61 @@ function db() {
   return globalThis.__dhSql;
 }
 
-// Version 1 stored fixed calls/meetings/sign-ups columns in dh_results.
-// Copy that data into the flexible metric tables once; dh_results is left untouched as a backup.
-async function migrateV1(sql) {
+// Schema history:
+//   v1  fixed calls/meetings/sign-ups columns in dh_results
+//   v2  flexible metrics (dh_metrics, dh_person_metrics, dh_entries)
+//   v3  teams: people, sessions and metrics belong to a team
+async function migrate(sql) {
   await sql.begin(async (tx) => {
     await tx`SELECT pg_advisory_xact_lock(4242)`;
-    const [done] = await tx`SELECT value FROM dh_settings WHERE key = 'schema_version'`;
-    if (done) return;
-    const [old] = await tx`SELECT to_regclass('dh_results') AS t`;
-    const oldRows = old.t ? await tx`SELECT * FROM dh_results` : [];
-    if (oldRows.length) {
-      const legacy = [["calls", "Calls"], ["meetings", "Meetings"], ["signups", "Sign-ups"]];
-      const ids = {};
-      for (const [key, name] of legacy) {
-        ids[key] = crypto.randomUUID();
-        await tx`INSERT INTO dh_metrics (id, name) VALUES (${ids[key]}, ${name})`;
-      }
-      const people = await tx`SELECT * FROM dh_people ORDER BY seq`;
-      for (const p of people) {
-        for (const [key] of legacy) {
-          await tx`INSERT INTO dh_person_metrics (person_id, metric_id, goal) VALUES (${p.id}, ${ids[key]}, ${p["goal_" + key]})`;
+    const [row] = await tx`SELECT value FROM dh_settings WHERE key = 'schema_version'`;
+    const version = row ? Number(row.value) : 1;
+
+    if (version < 2) {
+      // Copy v1 data into metrics once; dh_results is left untouched as a backup.
+      const [old] = await tx`SELECT to_regclass('dh_results') AS t`;
+      const oldRows = old.t ? await tx`SELECT * FROM dh_results` : [];
+      if (oldRows.length) {
+        const legacy = [["calls", "Calls"], ["meetings", "Meetings"], ["signups", "Sign-ups"]];
+        const ids = {};
+        for (const [key, name] of legacy) {
+          ids[key] = crypto.randomUUID();
+          await tx`INSERT INTO dh_metrics (id, name) VALUES (${ids[key]}, ${name})`;
         }
-      }
-      for (const r of oldRows) {
-        for (const [key] of legacy) {
-          if (r[key] === null) continue;
-          await tx`INSERT INTO dh_entries (session_id, person_id, metric_id, value, goal)
-                   VALUES (${r.session_id}, ${r.person_id}, ${ids[key]}, ${r[key]}, ${r["goal_" + key]})
-                   ON CONFLICT DO NOTHING`;
+        const people = await tx`SELECT * FROM dh_people ORDER BY seq`;
+        for (const p of people) {
+          for (const [key] of legacy) {
+            await tx`INSERT INTO dh_person_metrics (person_id, metric_id, goal) VALUES (${p.id}, ${ids[key]}, ${p["goal_" + key]})`;
+          }
+        }
+        for (const r of oldRows) {
+          for (const [key] of legacy) {
+            if (r[key] === null) continue;
+            await tx`INSERT INTO dh_entries (session_id, person_id, metric_id, value, goal)
+                     VALUES (${r.session_id}, ${r.person_id}, ${ids[key]}, ${r[key]}, ${r["goal_" + key]})
+                     ON CONFLICT DO NOTHING`;
+          }
         }
       }
     }
-    await tx`INSERT INTO dh_settings (key, value) VALUES ('schema_version', '2')`;
+
+    if (version < 3) {
+      // Everything that existed before teams belongs to Recruitment; Admin starts empty.
+      const [{ n }] = await tx`SELECT count(*)::int AS n FROM dh_teams`;
+      if (!n) {
+        await tx`INSERT INTO dh_teams (id, name, slug) VALUES (${crypto.randomUUID()}, 'Recruitment', 'recruitment')`;
+        await tx`INSERT INTO dh_teams (id, name, slug) VALUES (${crypto.randomUUID()}, 'Admin', 'admin')`;
+      }
+      const [first] = await tx`SELECT id FROM dh_teams ORDER BY seq LIMIT 1`;
+      await tx`UPDATE dh_people SET team_id = ${first.id} WHERE team_id IS NULL`;
+      await tx`UPDATE dh_sessions SET team_id = ${first.id} WHERE team_id IS NULL`;
+      await tx`UPDATE dh_metrics SET team_id = ${first.id} WHERE team_id IS NULL`;
+    }
+
+    if (version < 3) {
+      await tx`INSERT INTO dh_settings (key, value) VALUES ('schema_version', '3')
+               ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`;
+    }
   });
 }
 
@@ -105,7 +139,7 @@ function ensureSchema(sql) {
   if (!schemaReady) {
     schemaReady = sql.unsafe(SCHEMA)
       .catch(() => new Promise((r) => setTimeout(r, 300)).then(() => sql.unsafe(SCHEMA))) // two cold starts racing
-      .then(() => migrateV1(sql))
+      .then(() => migrate(sql))
       .catch((e) => { schemaReady = null; throw e; });
   }
   return schemaReady;
@@ -141,6 +175,28 @@ function cleanDate(v) {
 function cleanId(v, what) {
   if (!v || !UUID.test(v)) throw new HttpError(404, what + " not found.");
   return v.toLowerCase();
+}
+function slugify(name) {
+  return name.toLowerCase().normalize("NFKD").replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 40) || "team";
+}
+async function uniqueSlug(sql, name) {
+  const base = slugify(name);
+  let slug = base, i = 2;
+  // "admin" is also the admin page's path, which is fine: team links use ?team=
+  while ((await sql`SELECT 1 FROM dh_teams WHERE slug = ${slug}`).length) slug = base + "-" + i++;
+  return slug;
+}
+async function teamFrom(sql, value) {
+  const v = String(value ?? "").trim().toLowerCase();
+  const rows = v
+    ? await sql`SELECT id, name, slug FROM dh_teams WHERE slug = ${v} OR id::text = ${v}`
+    : await sql`SELECT id, name, slug FROM dh_teams ORDER BY seq LIMIT 1`;
+  if (!rows.length) throw new HttpError(404, "Team not found.");
+  return rows[0];
+}
+function sameTeam(...rows) {
+  const t = rows[0].team_id;
+  if (!rows.every((r) => r.team_id === t)) throw new HttpError(400, "Those belong to different teams.");
 }
 async function mustExist(sql, table, id, what) {
   const [row] = await sql`SELECT * FROM ${sql(table)} WHERE id = ${id}`;
@@ -186,21 +242,27 @@ async function checkToken(secret, request) {
 }
 
 // ---------- data ----------
-async function getData(sql) {
-  const [settings, metrics, people, assigned, sessions, entries] = await Promise.all([
+async function getData(sql, teamParam) {
+  const team = await teamFrom(sql, teamParam);
+  const [settings, teams, metrics, people, assigned, sessions, entries] = await Promise.all([
     sql`SELECT key, value FROM dh_settings`,
-    sql`SELECT id, name FROM dh_metrics ORDER BY seq`,
-    sql`SELECT id, name, active FROM dh_people ORDER BY seq`,
-    sql`SELECT person_id, metric_id, goal FROM dh_person_metrics ORDER BY seq`,
-    sql`SELECT id, to_char(date, 'YYYY-MM-DD') AS date FROM dh_sessions ORDER BY date DESC, seq DESC`,
-    sql`SELECT session_id, person_id, metric_id, value, goal FROM dh_entries`,
+    sql`SELECT id, name, slug FROM dh_teams ORDER BY seq`,
+    sql`SELECT id, name, default_goal FROM dh_metrics WHERE team_id = ${team.id} ORDER BY seq`,
+    sql`SELECT id, name, active FROM dh_people WHERE team_id = ${team.id} ORDER BY seq`,
+    sql`SELECT pm.person_id, pm.metric_id, pm.goal FROM dh_person_metrics pm
+        JOIN dh_people p ON p.id = pm.person_id WHERE p.team_id = ${team.id} ORDER BY pm.seq`,
+    sql`SELECT id, to_char(date, 'YYYY-MM-DD') AS date FROM dh_sessions WHERE team_id = ${team.id} ORDER BY date DESC, seq DESC`,
+    sql`SELECT e.session_id, e.person_id, e.metric_id, e.value, e.goal FROM dh_entries e
+        JOIN dh_sessions s ON s.id = e.session_id WHERE s.team_id = ${team.id}`,
   ]);
   const s = Object.fromEntries(settings.map((r) => [r.key, r.value]));
   const byPerson = {};
   for (const a of assigned) (byPerson[a.person_id] ||= []).push({ metricId: a.metric_id, goal: a.goal });
   return {
     title: s.title || "Development hour",
-    metrics: metrics.map((x) => ({ id: x.id, name: x.name })),
+    team: { id: team.id, name: team.name, slug: team.slug },
+    teams: teams.map((t) => ({ id: t.id, name: t.name, slug: t.slug })),
+    metrics: metrics.map((x) => ({ id: x.id, name: x.name, defaultGoal: x.default_goal })),
     people: people.map((p) => ({ id: p.id, name: p.name, active: p.active, metrics: byPerson[p.id] || [] })),
     sessions: sessions.map((x) => ({ id: x.id, date: x.date })),
     entries: entries.map((e) => ({
@@ -225,28 +287,49 @@ async function admin(request, sql, parts) {
     return json({ title });
   }
 
-  // Metric library
+  if (resource === "teams") {
+    if (method === "POST" && !rawId) {
+      const body = await readJSON(request);
+      const name = cleanName(body.name, 40);
+      const team = { id: crypto.randomUUID(), name, slug: await uniqueSlug(sql, name) };
+      await sql`INSERT INTO dh_teams (id, name, slug) VALUES (${team.id}, ${team.name}, ${team.slug})`;
+      return json(team, 201);
+    }
+    const id = cleanId(rawId, "Team");
+    await mustExist(sql, "dh_teams", id, "Team");
+    if (method === "PATCH") {
+      // The link (slug) stays the same when a team is renamed, so shared links keep working.
+      const body = await readJSON(request);
+      const name = cleanName(body.name, 40);
+      await sql`UPDATE dh_teams SET name = ${name} WHERE id = ${id}`;
+      return json({ id, name });
+    }
+  }
+
+  // Metric library (per team)
   if (resource === "metrics") {
     if (method === "POST" && !rawId) {
       const body = await readJSON(request);
+      const team = await teamFrom(sql, body.teamId);
       const metric = { id: crypto.randomUUID(), name: cleanName(body.name, 40) };
       const goal = cleanCount(body.goal);
       await sql.begin(async (tx) => {
-        await tx`INSERT INTO dh_metrics (id, name) VALUES (${metric.id}, ${metric.name})`;
+        await tx`INSERT INTO dh_metrics (id, name, team_id, default_goal) VALUES (${metric.id}, ${metric.name}, ${team.id}, ${goal})`;
         if (body.assignAll) {
           await tx`INSERT INTO dh_person_metrics (person_id, metric_id, goal)
-                   SELECT id, ${metric.id}, ${goal} FROM dh_people WHERE active ORDER BY seq`;
+                   SELECT id, ${metric.id}, ${goal} FROM dh_people WHERE active AND team_id = ${team.id} ORDER BY seq`;
         }
       });
       return json(metric, 201);
     }
     const id = cleanId(rawId, "Metric");
-    await mustExist(sql, "dh_metrics", id, "Metric");
+    const metric = await mustExist(sql, "dh_metrics", id, "Metric");
     if (method === "PATCH") {
       const body = await readJSON(request);
-      const name = cleanName(body.name, 40);
-      await sql`UPDATE dh_metrics SET name = ${name} WHERE id = ${id}`;
-      return json({ id, name });
+      const name = body.name !== undefined ? cleanName(body.name, 40) : metric.name;
+      const defaultGoal = body.defaultGoal !== undefined ? cleanCount(body.defaultGoal) : metric.default_goal;
+      await sql`UPDATE dh_metrics SET name = ${name}, default_goal = ${defaultGoal} WHERE id = ${id}`;
+      return json({ id, name, defaultGoal });
     }
     if (method === "DELETE") {
       await sql`DELETE FROM dh_metrics WHERE id = ${id}`; // assignments and logged numbers cascade
@@ -257,10 +340,18 @@ async function admin(request, sql, parts) {
   if (resource === "people") {
     if (method === "POST" && !rawId) {
       const body = await readJSON(request);
+      const team = await teamFrom(sql, body.teamId);
       const person = { id: crypto.randomUUID(), name: cleanName(body.name), active: true };
-      const copyFrom = body.copyFrom ? cleanId(body.copyFrom, "Person") : null;
+      // copyFrom: "all" = every team metric at its default goal, or a person's id to copy their metrics and goals
+      const allMetrics = body.copyFrom === "all";
+      const copyFrom = body.copyFrom && !allMetrics ? cleanId(body.copyFrom, "Person") : null;
+      if (copyFrom) sameTeam(await mustExist(sql, "dh_people", copyFrom, "Person"), { team_id: team.id });
       await sql.begin(async (tx) => {
-        await tx`INSERT INTO dh_people (id, name) VALUES (${person.id}, ${person.name})`;
+        await tx`INSERT INTO dh_people (id, name, team_id) VALUES (${person.id}, ${person.name}, ${team.id})`;
+        if (allMetrics) {
+          await tx`INSERT INTO dh_person_metrics (person_id, metric_id, goal)
+                   SELECT ${person.id}, id, default_goal FROM dh_metrics WHERE team_id = ${team.id} ORDER BY seq`;
+        }
         if (copyFrom) {
           await tx`INSERT INTO dh_person_metrics (person_id, metric_id, goal)
                    SELECT ${person.id}, metric_id, goal FROM dh_person_metrics WHERE person_id = ${copyFrom} ORDER BY seq`;
@@ -274,8 +365,9 @@ async function admin(request, sql, parts) {
     // PUT / DELETE /people/:id/metrics/:metricId
     if (sub === "metrics") {
       const metricId = cleanId(rawSubId, "Metric");
-      await mustExist(sql, "dh_metrics", metricId, "Metric");
+      const metric = await mustExist(sql, "dh_metrics", metricId, "Metric");
       if (method === "PUT") {
+        sameTeam(existing, metric);
         const body = await readJSON(request);
         const goal = cleanCount(body.goal);
         await sql`INSERT INTO dh_person_metrics (person_id, metric_id, goal) VALUES (${id}, ${metricId}, ${goal})
@@ -305,21 +397,27 @@ async function admin(request, sql, parts) {
   if (resource === "sessions") {
     if (method === "POST" && !rawId) {
       const body = await readJSON(request);
+      const team = await teamFrom(sql, body.teamId);
       const session = { id: crypto.randomUUID(), date: cleanDate(body.date) };
-      await sql`INSERT INTO dh_sessions (id, date) VALUES (${session.id}, ${session.date})`;
+      await sql`INSERT INTO dh_sessions (id, date, team_id) VALUES (${session.id}, ${session.date}, ${team.id})`;
       return json(session, 201);
     }
     const id = cleanId(rawId, "Session");
-    await mustExist(sql, "dh_sessions", id, "Session");
+    const session = await mustExist(sql, "dh_sessions", id, "Session");
 
     // PUT /sessions/:id/entries/:personId  { values: { metricId: number | null } }
     if (sub === "entries" && method === "PUT") {
       const personId = cleanId(rawSubId, "Person");
-      await mustExist(sql, "dh_people", personId, "Person");
+      const person = await mustExist(sql, "dh_people", personId, "Person");
+      sameTeam(session, person);
       const body = await readJSON(request);
       const values = body.values && typeof body.values === "object" ? body.values : {};
       const keys = Object.keys(values);
       if (keys.length > 50) throw new HttpError(400, "Too many metrics in one save.");
+      const metricIds = keys.map((k) => cleanId(k, "Metric"));
+      const metricRows = metricIds.length ? await sql`SELECT id, team_id FROM dh_metrics WHERE id IN ${sql(metricIds)}` : [];
+      if (metricRows.length !== metricIds.length) throw new HttpError(404, "Metric not found.");
+      sameTeam(session, ...metricRows);
       await sql.begin(async (tx) => {
         for (const raw of keys) {
           const metricId = cleanId(raw, "Metric");
@@ -375,7 +473,7 @@ export async function handle(request) {
     const sql = db();
     await ensureSchema(sql);
 
-    if (parts[0] === "data" && request.method === "GET") return json(await getData(sql));
+    if (parts[0] === "data" && request.method === "GET") return json(await getData(sql, url.searchParams.get("team")));
 
     if (parts[0] === "login" && request.method === "POST") {
       if (!secret) throw new HttpError(500, "ADMIN_PASSWORD isn't set in the Vercel project's environment variables.");
