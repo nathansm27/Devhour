@@ -1,0 +1,9 @@
+{
+  "name": "devhour",
+  "private": true,
+  "version": "2.0.0",
+  "type": "module",
+  "dependencies": {
+    "postgres": "^3.4.5"
+  }
+}
