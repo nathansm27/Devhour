@@ -3,8 +3,12 @@
 // Storage: Postgres (Neon on Vercel sets DATABASE_URL).
 
 import postgres from "postgres";
+import { randomInt } from "node:crypto";
 
 const TOKEN_DAYS = 30;
+const SELF_TOKEN_DAYS = 90;
+const PIN_TRIES = 5;          // wrong PINs before a person is locked out
+const PIN_LOCK_MINUTES = 15;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 const SCHEMA = `
@@ -60,7 +64,10 @@ CREATE TABLE IF NOT EXISTS dh_entries (
 ALTER TABLE dh_people ADD COLUMN IF NOT EXISTS team_id UUID REFERENCES dh_teams(id) ON DELETE CASCADE;
 ALTER TABLE dh_sessions ADD COLUMN IF NOT EXISTS team_id UUID REFERENCES dh_teams(id) ON DELETE CASCADE;
 ALTER TABLE dh_metrics ADD COLUMN IF NOT EXISTS team_id UUID REFERENCES dh_teams(id) ON DELETE CASCADE;
-ALTER TABLE dh_metrics ADD COLUMN IF NOT EXISTS default_goal INTEGER NOT NULL DEFAULT 0;`;
+ALTER TABLE dh_metrics ADD COLUMN IF NOT EXISTS default_goal INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE dh_people ADD COLUMN IF NOT EXISTS pin TEXT;
+ALTER TABLE dh_people ADD COLUMN IF NOT EXISTS pin_fails INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE dh_people ADD COLUMN IF NOT EXISTS pin_locked_until TIMESTAMPTZ;`;
 
 class HttpError extends Error {
   constructor(status, message) { super(message); this.status = status; }
@@ -127,6 +134,10 @@ async function migrate(sql) {
       await tx`UPDATE dh_metrics SET team_id = ${first.id} WHERE team_id IS NULL`;
     }
 
+    // Everyone needs a PIN to log their own numbers from the leaderboard.
+    const noPin = await tx`SELECT id FROM dh_people WHERE pin IS NULL`;
+    for (const p of noPin) await tx`UPDATE dh_people SET pin = ${newPin()} WHERE id = ${p.id}`;
+
     if (version < 3) {
       await tx`INSERT INTO dh_settings (key, value) VALUES ('schema_version', '3')
                ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`;
@@ -176,6 +187,13 @@ function cleanId(v, what) {
   if (!v || !UUID.test(v)) throw new HttpError(404, what + " not found.");
   return v.toLowerCase();
 }
+function newPin() {
+  return String(randomInt(0, 10000)).padStart(4, "0");
+}
+// Today's date in London as YYYY-MM-DD.
+function londonToday() {
+  return new Intl.DateTimeFormat("en-CA", { timeZone: "Europe/London", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date());
+}
 function slugify(name) {
   return name.toLowerCase().normalize("NFKD").replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 40) || "team";
 }
@@ -223,22 +241,106 @@ async function sameText(a, b) {
   for (let i = 0; i < x.length; i++) diff |= x[i] ^ y[i];
   return diff === 0;
 }
-async function makeToken(secret) {
-  const payload = b64url(enc.encode(JSON.stringify({ exp: Date.now() + TOKEN_DAYS * 864e5 })));
-  return payload + "." + (await hmac(secret, payload));
+// Tokens are "<base64 payload>.<HMAC>". Admin tokens carry {exp}; personal tokens carry {exp, pid}
+// and are signed with a key that includes the person's PIN, so a new PIN signs them out.
+async function makeToken(key, extra = {}, days = TOKEN_DAYS) {
+  const payload = b64url(enc.encode(JSON.stringify({ ...extra, exp: Date.now() + days * 864e5 })));
+  return payload + "." + (await hmac(key, payload));
 }
-async function checkToken(secret, request) {
+function bearer(request) {
   const header = request.headers.get("authorization") || "";
-  const token = header.startsWith("Bearer ") ? header.slice(7) : "";
+  return header.startsWith("Bearer ") ? header.slice(7) : "";
+}
+function peek(token) {
+  try { return JSON.parse(Buffer.from(token.split(".")[0], "base64url").toString("utf8")); } catch { return null; }
+}
+async function verify(token, key) {
   const [payload, sig] = token.split(".");
-  if (!payload || !sig) return false;
-  if (!(await sameText(sig, await hmac(secret, payload)))) return false;
-  try {
-    const { exp } = JSON.parse(Buffer.from(payload, "base64url").toString("utf8"));
-    return typeof exp === "number" && exp > Date.now();
-  } catch {
-    return false;
+  if (!payload || !sig) return null;
+  if (!(await sameText(sig, await hmac(key, payload)))) return null;
+  const d = peek(token);
+  return d && typeof d.exp === "number" && d.exp > Date.now() ? d : null;
+}
+async function checkAdmin(secret, request) {
+  const d = await verify(bearer(request), secret);
+  return !!d && !d.pid;
+}
+const selfKey = (secret, person) => secret + "|self|" + person.id + "|" + person.pin;
+async function checkSelf(sql, secret, request) {
+  const token = bearer(request);
+  const pid = peek(token)?.pid;
+  if (!pid || !UUID.test(pid)) return null;
+  const [person] = await sql`SELECT * FROM dh_people WHERE id = ${pid}`;
+  if (!person || !person.active || !person.pin) return null;
+  return (await verify(token, selfKey(secret, person))) ? person : null;
+}
+
+// ---------- self-logging (from the leaderboard, with a PIN) ----------
+async function self(request, sql, secret, parts) {
+  const method = request.method;
+
+  if (parts[0] === "login" && method === "POST") {
+    const body = await readJSON(request);
+    const pid = cleanId(body.personId, "Person");
+    const [p] = await sql`SELECT * FROM dh_people WHERE id = ${pid}`;
+    if (!p || !p.active) throw new HttpError(404, "Person not found.");
+    if (p.pin_locked_until && new Date(p.pin_locked_until) > new Date()) {
+      throw new HttpError(429, `Too many wrong PINs. Try again in ${PIN_LOCK_MINUTES} minutes.`);
+    }
+    if (!(await sameText(String(body.pin ?? "").trim(), p.pin || ""))) {
+      const fails = p.pin_fails + 1;
+      if (fails >= PIN_TRIES) {
+        await sql`UPDATE dh_people SET pin_fails = 0, pin_locked_until = now() + ${PIN_LOCK_MINUTES + " minutes"}::interval WHERE id = ${pid}`;
+      } else {
+        await sql`UPDATE dh_people SET pin_fails = ${fails} WHERE id = ${pid}`;
+      }
+      await new Promise((r) => setTimeout(r, 600));
+      throw new HttpError(401, fails >= PIN_TRIES ? `Too many wrong PINs. Try again in ${PIN_LOCK_MINUTES} minutes.` : "Wrong PIN.");
+    }
+    await sql`UPDATE dh_people SET pin_fails = 0, pin_locked_until = NULL WHERE id = ${pid}`;
+    return json({ token: await makeToken(selfKey(secret, p), { pid }, SELF_TOKEN_DAYS), personId: pid });
   }
+
+  // PUT /self/entries { values: { metricId: number | null } } -> today's session for the person's team
+  if (parts[0] === "entries" && method === "PUT") {
+    const person = await checkSelf(sql, secret, request);
+    if (!person) throw new HttpError(401, "Enter your PIN again.");
+    const body = await readJSON(request);
+    const values = body.values && typeof body.values === "object" ? body.values : {};
+    const keys = Object.keys(values);
+    if (!keys.length || keys.length > 50) throw new HttpError(400, "Nothing to save.");
+    const metricIds = keys.map((k) => cleanId(k, "Metric"));
+    const mine = await sql`SELECT metric_id FROM dh_person_metrics WHERE person_id = ${person.id} AND metric_id IN ${sql(metricIds)}`;
+    if (mine.length !== metricIds.length) throw new HttpError(403, "You can only log your own metrics.");
+    const today = londonToday();
+
+    const sessionId = await sql.begin(async (tx) => {
+      // One session per team per day; the first person to log creates it.
+      await tx`SELECT pg_advisory_xact_lock(hashtext(${person.team_id + today}))`;
+      let [session] = await tx`SELECT id FROM dh_sessions WHERE team_id = ${person.team_id} AND date = ${today} ORDER BY seq LIMIT 1`;
+      if (!session) {
+        session = { id: crypto.randomUUID() };
+        await tx`INSERT INTO dh_sessions (id, date, team_id) VALUES (${session.id}, ${today}, ${person.team_id})`;
+      }
+      for (let i = 0; i < keys.length; i++) {
+        const v = cleanCount(values[keys[i]], true);
+        const metricId = metricIds[i];
+        if (v === null) {
+          await tx`DELETE FROM dh_entries WHERE session_id = ${session.id} AND person_id = ${person.id} AND metric_id = ${metricId}`;
+          continue;
+        }
+        await tx`INSERT INTO dh_entries (session_id, person_id, metric_id, value, goal)
+                 SELECT ${session.id}, ${person.id}, ${metricId}, ${v}, goal FROM dh_person_metrics
+                 WHERE person_id = ${person.id} AND metric_id = ${metricId}
+                 ON CONFLICT (session_id, person_id, metric_id)
+                 DO UPDATE SET value = EXCLUDED.value, updated_at = now()`;
+      }
+      return session.id;
+    });
+    return json({ sessionId, date: today });
+  }
+
+  throw new HttpError(404, "Not found.");
 }
 
 // ---------- data ----------
@@ -278,6 +380,13 @@ async function admin(request, sql, parts) {
   const [resource, rawId, sub, rawSubId] = parts;
 
   if (resource === "check" && method === "GET") return json({ ok: true });
+
+  // PINs are only ever sent to the admin page.
+  if (resource === "pins" && method === "GET") {
+    const team = await teamFrom(sql, new URL(request.url).searchParams.get("team"));
+    const rows = await sql`SELECT id, pin FROM dh_people WHERE team_id = ${team.id}`;
+    return json(Object.fromEntries(rows.map((r) => [r.id, r.pin])));
+  }
 
   if (resource === "settings" && method === "PUT") {
     const body = await readJSON(request);
@@ -347,7 +456,7 @@ async function admin(request, sql, parts) {
       const copyFrom = body.copyFrom && !allMetrics ? cleanId(body.copyFrom, "Person") : null;
       if (copyFrom) sameTeam(await mustExist(sql, "dh_people", copyFrom, "Person"), { team_id: team.id });
       await sql.begin(async (tx) => {
-        await tx`INSERT INTO dh_people (id, name, team_id) VALUES (${person.id}, ${person.name}, ${team.id})`;
+        await tx`INSERT INTO dh_people (id, name, team_id, pin) VALUES (${person.id}, ${person.name}, ${team.id}, ${newPin()})`;
         if (allMetrics) {
           await tx`INSERT INTO dh_person_metrics (person_id, metric_id, goal)
                    SELECT ${person.id}, id, default_goal FROM dh_metrics WHERE team_id = ${team.id} ORDER BY seq`;
@@ -383,6 +492,11 @@ async function admin(request, sql, parts) {
 
     if (!sub && method === "PATCH") {
       const body = await readJSON(request);
+      if (body.newPin) {
+        const pin = newPin();
+        await sql`UPDATE dh_people SET pin = ${pin}, pin_fails = 0, pin_locked_until = NULL WHERE id = ${id}`;
+        return json({ id, pin });
+      }
       const name = body.name !== undefined ? cleanName(body.name) : existing.name;
       const active = body.active !== undefined ? !!body.active : existing.active;
       await sql`UPDATE dh_people SET name = ${name}, active = ${active} WHERE id = ${id}`;
@@ -485,8 +599,13 @@ export async function handle(request) {
       return json({ token: await makeToken(secret) });
     }
 
+    if (parts[0] === "self") {
+      if (!secret) throw new HttpError(500, "ADMIN_PASSWORD isn't set in the Vercel project's environment variables.");
+      return await self(request, sql, secret, parts.slice(1));
+    }
+
     if (parts[0] === "admin") {
-      if (!secret || !(await checkToken(secret, request))) throw new HttpError(401, "Sign in again.");
+      if (!secret || !(await checkAdmin(secret, request))) throw new HttpError(401, "Sign in again.");
       return await admin(request, sql, parts.slice(1));
     }
 

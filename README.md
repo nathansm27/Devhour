@@ -48,6 +48,13 @@ The database tables are created automatically on the first request.
 
 - **Teams:** each team has its own people, metrics and sessions, and they're managed from the same admin page using the team tabs. Renaming a team keeps its link.
 - **Metrics:** create any metrics you like in admin (Metrics panel), then give each person the ones that apply, with their own goal per session.
+- **Self-logging:**
+  - Each person has a 4-digit PIN, shown on their card in admin.
+  - On the leaderboard, they tap their name, enter the PIN once per device, and log today's numbers with + and − buttons.
+  - Numbers go into today's session (London date), which is created automatically if it doesn't exist yet.
+  - Boards refresh every 5 seconds.
+  - Five wrong PINs lock that person out for 15 minutes.
+  - "New PIN" signs them out on every device.
 - **Scoring:** each score averages that person's metrics against their goals, each capped at 200%, so people tracking different things can share one leaderboard.
 - **Goals and history:** goals are copied onto each number when it's first logged, so changing a goal later doesn't rewrite past sessions. "Use current goals" re-applies everyone's current goals to one session.
 - **Removing things:**

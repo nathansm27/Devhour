@@ -1,7 +1,8 @@
 (function () {
   "use strict";
   var D = window.DH, esc = D.esc;
-  var REFRESH_MS = 30000;
+  var REFRESH_MS = 5000;
+  var SELF_KEY = "devhour-self-";
 
   var m = null, lastJSON = "", sel = null, openId = null, intro = true, lastOk = 0, failed = false;
   var teamParam = new URLSearchParams(location.search).get("team") || "";
@@ -101,14 +102,14 @@
     if (r.logged.length) h += podiumHTML(r.logged.slice(0, 3));
     h += boardHTML(r);
     if (r.logged.length) {
-      h += '<p class="foot">Each score averages that person\u2019s metrics against their own goals. The line under each row fills at 100%.</p>';
+      h += '<p class="foot">Each score averages that person\u2019s metrics against their own goals. The line under each row fills at 100%. Tap your name to log your numbers.</p>';
     }
     var main = $("main");
     main.className = intro ? "intro" : "";
     main.innerHTML = h;
     $("side").innerHTML = sideHTML(r);
     intro = false;
-    if (openId) renderSheet(false);
+    if (openId && !sheetBusy()) renderSheet(false);
   }
 
   function emptyHTML(title, text) {
@@ -234,14 +235,102 @@
     return h + "</div>";
   }
 
+  // ---------- self-logging ----------
+  var logState = { pid: null, pinOpen: false, pinErr: "", saving: 0, dirty: false, status: "", timer: null };
+  function selfToken(pid) { try { return localStorage.getItem(SELF_KEY + pid); } catch (e) { return null; } }
+  function setSelfToken(pid, t) {
+    try { if (t) localStorage.setItem(SELF_KEY + pid, t); else localStorage.removeItem(SELF_KEY + pid); } catch (e) {}
+  }
+  function londonToday() {
+    return new Intl.DateTimeFormat("en-CA", { timeZone: "Europe/London", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date());
+  }
+  function loggable(p) { return p.active ? p.metrics.filter(function (a) { return a.goal > 0; }) : []; }
+
+  function logHTML(p) {
+    var mets = loggable(p);
+    if (!mets.length) return "";
+    var tok = selfToken(p.id);
+    if (!tok) {
+      if (logState.pinOpen && logState.pid === p.id) {
+        return '<form class="pinform" id="pinForm"><label for="pinIn">Enter your PIN to log your numbers</label>' +
+          '<div class="pinrow"><input class="field" id="pinIn" type="password" inputmode="numeric" pattern="[0-9]*" maxlength="4" autocomplete="off" placeholder="\u2022\u2022\u2022\u2022">' +
+          '<button class="btn primary" type="submit">Unlock</button></div>' +
+          '<p class="pinerr" role="alert">' + esc(logState.pinErr) + "</p>" +
+          "<small>Your manager has your 4-digit PIN. This device remembers it.</small></form>";
+      }
+      return '<button class="btn primary logbtn" data-act="log-start" data-id="' + p.id + '">Log my numbers</button>';
+    }
+    var today = londonToday();
+    var session = m.desc.filter(function (x) { return x.date === today; })[0];
+    var e = session ? D.entry(m, session.id, p.id) || {} : {};
+    var h = '<div class="logpanel"><div class="lp-head"><div><b>Today\u2019s numbers</b><small>' + esc(D.fmtDate(today)) + "</small></div>" +
+      '<span class="lp-status" id="lpStatus">' + esc(logState.status) + "</span></div>";
+    mets.forEach(function (a) {
+      var v = e[a.metricId] ? e[a.metricId].value : "";
+      var name = D.metricName(m, a.metricId);
+      h += '<div class="lrow"><span class="ln"><i class="dot" style="background:' + D.metricColor(m, a.metricId) + '"></i><span class="pn-t">' + esc(name) + "</span></span>" +
+        '<span class="lg">/ ' + a.goal + "</span>" +
+        '<div class="stepper"><button type="button" id="dn-' + a.metricId + '" data-step="-1" data-m="' + a.metricId + '" aria-label="One less ' + esc(name) + '">\u2212</button>' +
+        '<input class="field" type="number" inputmode="numeric" min="0" step="1" id="lv-' + a.metricId + '" data-lv="' + a.metricId + '" value="' + v + '" aria-label="' + esc(name) + '" placeholder="0">' +
+        '<button type="button" id="up-' + a.metricId + '" data-step="1" data-m="' + a.metricId + '" aria-label="One more ' + esc(name) + '">+</button></div></div>';
+    });
+    h += '<button class="lp-out" data-act="log-out" data-id="' + p.id + '">Not ' + esc(firstName(p)) + "? Sign out on this device</button></div>";
+    return h;
+  }
+
+  function setLogStatus(t) {
+    logState.status = t;
+    var el = document.getElementById("lpStatus");
+    if (el) el.textContent = t;
+  }
+
+  function queueSave(pid) {
+    logState.dirty = true;
+    setLogStatus("");
+    clearTimeout(logState.timer);
+    logState.timer = setTimeout(function () { saveSelf(pid); }, 500);
+  }
+
+  function saveSelf(pid) {
+    var values = {};
+    Array.prototype.forEach.call(document.querySelectorAll("[data-lv]"), function (inp) {
+      var v = inp.value.trim();
+      values[inp.getAttribute("data-lv")] = v === "" ? null : Math.max(0, Math.floor(Number(v)) || 0);
+    });
+    logState.dirty = false;
+    logState.saving++;
+    setLogStatus("Saving\u2026");
+    D.api("/api/self/entries", { method: "PUT", body: { values: values }, token: selfToken(pid) }).then(function () {
+      logState.saving--;
+      if (!logState.saving && !logState.dirty) setLogStatus("Saved");
+      return load();
+    }, function (err) {
+      logState.saving--;
+      if (err.status === 401) {
+        setSelfToken(pid, null);
+        logState.pinOpen = true; logState.pid = pid; logState.pinErr = "Enter your PIN again.";
+        renderSheet(false);
+      } else {
+        setLogStatus("Couldn\u2019t save. Try again.");
+      }
+    });
+  }
+
+  function sheetBusy() {
+    var a = document.activeElement;
+    return logState.saving > 0 || logState.dirty || (a && a.tagName === "INPUT" && a.closest && a.closest(".sheet"));
+  }
+
   // ---------- detail sheet ----------
   var lastFocus = null;
   function openSheet(id) {
     lastFocus = document.activeElement;
+    if (logState.pid !== id) logState = { pid: id, pinOpen: false, pinErr: "", saving: 0, dirty: false, status: "", timer: null };
     openId = id;
     renderSheet(true);
   }
   function closeSheet() {
+    if (logState.dirty && logState.pid) { clearTimeout(logState.timer); saveSelf(logState.pid); }
     var root = $("sheetRoot");
     document.body.classList.remove("sheet-open");
     openId = null;
@@ -260,6 +349,7 @@
     var h = '<div class="scrim" data-close></div><div class="sheet" role="dialog" aria-modal="true" aria-labelledby="shName" tabindex="-1">' +
       '<div class="grab"></div><div class="sh-head">' + D.avatar(p) + '<div><h2 id="shName">' + esc(p.name) + "</h2><p>" + esc(selLabel(true)) + "</p></div>" +
       '<button class="close" data-close aria-label="Close">' + ICON.close + "</button></div>";
+    h += logHTML(p);
 
     if (!s) {
       h += '<p style="color:var(--muted);margin:22px 0">No results logged for ' + (sel === "all" ? "any session" : "this session") + ".</p>";
@@ -304,7 +394,9 @@
 
     var root = $("sheetRoot");
     var old = root.querySelector(".sheet"), scroll = old ? old.scrollTop : 0;
+    var focusId = document.activeElement && old && old.contains(document.activeElement) ? document.activeElement.id : null;
     root.innerHTML = h;
+    if (focusId && document.getElementById(focusId)) document.getElementById(focusId).focus({ preventScroll: true });
     var sheet = root.querySelector(".sheet");
     if (fresh) {
       document.body.style.overflow = "hidden";
@@ -343,6 +435,27 @@
 
   // ---------- events ----------
   document.addEventListener("click", function (e) {
+    var st = e.target.closest("[data-step]");
+    if (st) {
+      var inp = document.getElementById("lv-" + st.getAttribute("data-m"));
+      inp.value = Math.max(0, (Number(inp.value) || 0) + Number(st.getAttribute("data-step")));
+      queueSave(openId);
+      return;
+    }
+    var la = e.target.closest("[data-act]");
+    if (la) {
+      var act = la.getAttribute("data-act"), pid = la.getAttribute("data-id");
+      if (act === "log-start") {
+        logState.pid = pid; logState.pinOpen = true; logState.pinErr = "";
+        renderSheet(false);
+        var pi = document.getElementById("pinIn"); if (pi) pi.focus();
+      } else if (act === "log-out") {
+        setSelfToken(pid, null);
+        logState.pinOpen = false; logState.status = "";
+        renderSheet(false);
+      }
+      return;
+    }
     var t = e.target.closest("[data-mode],[data-open],[data-close]");
     if (!t) return;
     if (t.hasAttribute("data-mode")) {
@@ -353,6 +466,24 @@
     else closeSheet();
   });
   document.addEventListener("change", function (e) { if (e.target.id === "pick") setSel(e.target.value); });
+  document.addEventListener("input", function (e) { if (e.target.hasAttribute("data-lv")) queueSave(openId); });
+  document.addEventListener("submit", function (e) {
+    if (e.target.id !== "pinForm") return;
+    e.preventDefault();
+    var pid = logState.pid, pin = document.getElementById("pinIn").value.trim();
+    if (!/^\d{4}$/.test(pin)) { logState.pinErr = "Your PIN is 4 digits."; renderSheet(false); return; }
+    var btn = e.target.querySelector("button"); btn.disabled = true; btn.textContent = "Checking\u2026";
+    D.api("/api/self/login", { method: "POST", body: { personId: pid, pin: pin } }).then(function (r) {
+      setSelfToken(pid, r.token);
+      logState.pinOpen = false; logState.pinErr = "";
+      renderSheet(false);
+      var first = document.querySelector("[data-lv]"); if (first) first.focus({ preventScroll: true });
+    }, function (err) {
+      logState.pinErr = err.message;
+      renderSheet(false);
+      var pi = document.getElementById("pinIn"); if (pi) pi.focus();
+    });
+  });
   document.addEventListener("keydown", function (e) { if (e.key === "Escape" && openId) closeSheet(); });
   window.addEventListener("hashchange", function () { if (m) render(); });
   document.addEventListener("visibilitychange", function () { if (!document.hidden) load(); });

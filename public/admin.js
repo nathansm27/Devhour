@@ -6,7 +6,7 @@
 
   var token = null;
   try { token = localStorage.getItem(TOKEN_KEY); } catch (e) {}
-  var data = null, m = null, cur = null;
+  var data = null, m = null, cur = null, pins = {};
   var TEAM_KEY = "devhour-admin-team";
   var teamSlug = new URLSearchParams(location.search).get("team") || "";
   if (!teamSlug) { try { teamSlug = localStorage.getItem(TEAM_KEY) || ""; } catch (e) {} }
@@ -102,6 +102,9 @@
         teamSlug = ""; // saved team no longer exists: fall back to the first team
         return D.api("/api/data");
       });
+    }).then(function (d) {
+      return D.api("/api/admin/pins", { token: token, query: { team: d.team.slug } })
+        .then(function (p) { pins = p; return d; }, function () { pins = {}; return d; });
     }).then(function (d) {
       if (data && data.team.id !== d.team.id) cur = null;
       data = d; m = D.model(d);
@@ -234,13 +237,15 @@
   function teamPanel() {
     var active = m.people.filter(function (p) { return p.active; });
     var archived = m.people.filter(function (p) { return !p.active; });
-    var h = '<section class="panel"><h2>Team</h2><p class="hint">Each person can have their own metrics and goals per session. Past sessions keep the goals people had at the time.</p>';
+    var h = '<section class="panel"><h2>Team</h2><p class="hint">Each person can have their own metrics and goals. Give each person their PIN so they can log their own numbers by tapping their name on the leaderboard.</p>';
     if (active.length) {
       h += '<div class="cards">';
       active.forEach(function (p) {
         h += '<div class="card"><div class="card-head">' + D.avatar(p) +
           '<input class="field cname" type="text" maxlength="60" id="n-' + p.id + '" data-name="' + p.id + '" aria-label="Name" value="' + esc(p.name) + '">' +
-          '<button class="iconbtn" data-act="archive" data-id="' + p.id + '" aria-label="Archive ' + esc(p.name) + '" title="Archive">' + ICON.archive + "</button></div>";
+          '<button class="iconbtn" data-act="archive" data-id="' + p.id + '" aria-label="Archive ' + esc(p.name) + '" title="Archive">' + ICON.archive + "</button></div>" +
+          '<div class="pinline"><span>PIN <b class="num" id="pin-' + p.id + '">' + esc(pins[p.id] || "\u2013") + "</b></span>" +
+          '<button class="btn quiet" data-act="new-pin" data-id="' + p.id + '">New PIN</button></div>';
         if (!p.metrics.length) h += '<p class="hint" style="margin:4px 0 8px">No metrics yet.</p>';
         p.metrics.forEach(function (a) {
           h += '<div class="line tl"><span class="ln">' + dot(a.metricId) + '<span class="pn-t">' + esc(D.metricName(m, a.metricId)) + '</span></span><span class="lg">Goal</span>' +
@@ -468,6 +473,12 @@
       track(call("/api/admin/people/" + id + "/metrics/" + sel.value, "PUT", { goal: g })).then(reload).catch(function () {});
     } else if (act === "unassign" && p) {
       track(call("/api/admin/people/" + id + "/metrics/" + mid, "DELETE")).then(reload).catch(function () {});
+    } else if (act === "new-pin" && p) {
+      if (!confirm("Give " + p.name + " a new PIN? Their old PIN stops working and they\u2019ll need to enter the new one.")) return;
+      track(call("/api/admin/people/" + id, "PATCH", { newPin: true })).then(function (r) {
+        pins[id] = r.pin;
+        var el = document.getElementById("pin-" + id); if (el) el.textContent = r.pin;
+      }).catch(function () {});
     } else if (act === "archive" && p) {
       track(call("/api/admin/people/" + id, "PATCH", { active: false })).then(reload).catch(function () {});
     } else if (act === "restore" && p) {
