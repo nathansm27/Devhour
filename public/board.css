@@ -135,6 +135,9 @@
 .badge svg { width: 10px; height: 10px; }
 .badge.win { background: var(--win-soft); color: var(--win); }
 .badge.flame { background: var(--flame-soft); color: var(--flame); }
+.badge.wait { background: var(--soft); color: var(--muted); }
+.row.waiting .sc b { color: var(--faint); }
+.row.waiting .av { opacity: .75; }
 .badge.gold { background: var(--gold-soft); color: var(--gold); }
 .absent { margin: 12px 4px 2px; color: var(--faint); font-size: .8125rem; }
 .foot { margin: 16px auto 0; max-width: 720px; color: var(--faint); font-size: .75rem; text-align: center; }

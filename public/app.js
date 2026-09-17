@@ -57,7 +57,12 @@
     var h = decodeURIComponent(location.hash.slice(1));
     if (h === "all") return "all";
     if (m && m.desc.some(function (s) { return s.id === h; })) return h;
-    return m && m.desc.length ? m.desc[0].id : "all";
+    // With no sessions yet, show today (everyone's goals at zero).
+    if (!m || !m.desc.length) return "today";
+    // Default to the latest session that isn't in the future.
+    var today = londonToday();
+    var past = m.desc.filter(function (x) { return x.date <= today; })[0];
+    return (past || m.desc[m.desc.length - 1]).id;
   }
   function setSel(v) {
     history.replaceState(null, "", "#" + encodeURIComponent(v));
@@ -65,6 +70,7 @@
   }
   function sessionById(id) { return m.desc.filter(function (s) { return s.id === id; })[0]; }
   function selLabel(long) {
+    if (sel === "today") return long ? "Today, " + D.fmtDate(londonToday(), true) : "Today";
     if (sel === "all") return "All time";
     var s = sessionById(sel);
     return (s.id === m.desc[0].id && !long ? "Latest session" : D.fmtDate(s.date, long));
@@ -90,20 +96,19 @@
     }).join("");
     sel = readHash();
 
-    if (!m.people.length || !m.desc.length) {
-      $("main").innerHTML = emptyHTML("No results yet", "The leaderboard fills up after the first development hour is logged.");
+    var r = D.rank(m, sel);
+    if (!r.rows.length) {
+      $("main").innerHTML = emptyHTML("No goals set yet", "The leaderboard appears once people and their goals are added in admin.");
       $("side").innerHTML = "";
       intro = false;
       return;
     }
 
-    var r = D.rank(m, sel);
     var h = "";
-    if (r.logged.length) h += podiumHTML(r.logged.slice(0, 3));
+    var top = r.logged.filter(function (x) { return x.s.pct > 0; }).slice(0, 3);
+    h += top.length ? podiumHTML(top) : '<div style="height:24px"></div>';
     h += boardHTML(r);
-    if (r.logged.length) {
-      h += '<p class="foot">Each score averages that person\u2019s metrics against their own goals. The line under each row fills at 100%. Tap your name to log your numbers.</p>';
-    }
+    h += '<p class="foot">Each score averages that person\u2019s metrics against their own goals. The line under each row fills at 100%. Tap your name to log your numbers.</p>';
     var main = $("main");
     main.className = intro ? "intro" : "";
     main.innerHTML = h;
@@ -130,27 +135,23 @@
 
   function boardHTML(r) {
     var mode = sel === "all" ? "all" : "session";
-    var h = '<section class="board"><div class="board-bar"><span class="bt">' + ICON.list + (mode === "all" ? "All-time leaderboard" : "Session leaderboard") + "</span>" +
+    if (!m.desc.length) mode = "today";
+    var h = '<section class="board"><div class="board-bar"><span class="bt">' + ICON.list + (mode === "all" ? "All-time leaderboard" : mode === "today" ? "Today\u2019s leaderboard" : "Session leaderboard") + "</span>" +
       '<div class="ctrls">';
     if (mode === "session" && m.desc.length > 1) {
       h += '<label class="sr" for="pick">Session</label><select class="field pick" id="pick">' + m.desc.map(function (s, i) {
         return '<option value="' + s.id + '"' + (s.id === sel ? " selected" : "") + ">" + esc(D.fmtDate(s.date)) + "</option>";
       }).join("") + "</select>";
     }
-    h += '<div class="seg" role="group" aria-label="Period"><button data-mode="session" aria-pressed="' + (mode === "session") + '">Session</button>' +
-      '<button data-mode="all" aria-pressed="' + (mode === "all") + '">All time</button></div></div></div>';
-
-    if (!r.logged.length) {
-      return h + '<div class="empty" style="margin:4px 0 6px">' + ICON.empty + "<h2>Nobody logged yet</h2><p>Results for this session haven\u2019t been entered. Check back soon.</p></div></section>";
+    if (mode !== "today") {
+      h += '<div class="seg" role="group" aria-label="Period"><button data-mode="session" aria-pressed="' + (mode === "session") + '">Session</button>' +
+        '<button data-mode="all" aria-pressed="' + (mode === "all") + '">All time</button></div>';
     }
+    h += "</div></div>";
 
     h += "<ol>";
-    r.logged.forEach(function (x, i) { h += rowHTML(x, i); });
+    r.rows.forEach(function (x, i) { h += rowHTML(x, i); });
     h += "</ol>";
-    if (r.absent.length) {
-      h += '<p class="absent">' + (sel === "all" ? "No results yet: " : "Not logged this session: ") +
-        r.absent.map(function (p) { return esc(p.name); }).join(", ") + "</p>";
-    }
     return h + "</section>";
   }
 
@@ -167,11 +168,12 @@
     var w = s.pct == null ? 0 : Math.min(s.pct, 100);
     var badges = "";
     if (hit) badges += '<span class="badge win hide-sm">' + ICON.check + "Goal hit</span>";
-    var st = D.streak(m, x.p.id, sel === "all" ? null : sel);
+    var st = s.empty ? 0 : D.streak(m, x.p.id, sel === "all" ? null : sel);
+    if (s.empty) badges += '<span class="badge wait">Not logged yet</span>';
     if (st >= 2) badges += '<span class="badge flame">' + ICON.flame + st + " in a row</span>";
     var extraCount = Math.max(0, s.lines.length - 3);
-    return '<li><button class="row r' + (i + 1) + '" data-open="' + x.p.id + '">' +
-      '<span class="rk num">' + (i + 1) + "</span>" + D.avatar(x.p) +
+    return '<li><button class="row r' + (i + 1) + (s.empty ? " waiting" : "") + '" data-open="' + x.p.id + '">' +
+      '<span class="rk num">' + (s.empty ? "\u2013" : i + 1) + "</span>" + D.avatar(x.p) +
       '<span class="who"><span class="nm-line"><span class="nm">' + esc(x.p.name) + "</span>" + badges + "</span>" +
       '<span class="sub">' + s.lines.map(function (l, j) { return lineHTML(l, j >= 3); }).join("") +
       (extraCount ? '<span class="more-sm">+' + extraCount + " more</span>" : "") + "</span></span>" +
@@ -181,13 +183,15 @@
   }
 
   function sideHTML(r) {
-    var totals = D.teamTotals(m, r.logged);
+    var totals = D.teamTotals(m, r.rows);
     var pct = D.pctOf(totals);
     var hitCount = r.logged.filter(function (x) { return x.s.pct != null && x.s.pct >= 100; }).length;
-    var total = r.logged.length + r.absent.length;
+    var total = r.rows.length;
     var C = 2 * Math.PI * 34, fill = pct == null ? 0 : Math.min(pct, 100) / 100;
 
-    var note = sel === "all"
+    var note = sel === "today"
+      ? (r.logged.length ? r.logged.length + " of " + total + " logged today." : "Nobody has logged today yet. Tap your name on the board to add your numbers.")
+      : sel === "all"
       ? "Totals across " + m.desc.length + " " + (m.desc.length === 1 ? "session" : "sessions") + ", against everyone\u2019s goals for the sessions they attended."
       : r.logged.length + " of " + total + " " + (total === 1 ? "person" : "people") + " logged for " + D.fmtDate(sessionById(sel).date, true) + ".";
 
@@ -196,10 +200,10 @@
 
     h += '<div class="big"><div class="ring"><svg viewBox="0 0 80 80" aria-hidden="true"><defs><linearGradient id="rg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#B9C0FF"/><stop offset="1" stop-color="#5F6CE3"/></linearGradient></defs>' +
       '<circle cx="40" cy="40" r="34" fill="none" stroke="rgba(150,165,255,.14)" stroke-width="8"/>' +
-      '<circle cx="40" cy="40" r="34" fill="none" stroke="' + (pct >= 100 ? "#56DDA6" : "url(#rg)") + '" stroke-width="8" stroke-linecap="round" stroke-dasharray="' +
-      (C * fill).toFixed(1) + " " + C.toFixed(1) + '"/></svg><b class="num">' + (pct == null ? "\u2013" : pct + "%") + "</b></div>" +
-      "<p><strong>" + (r.logged.length ? hitCount + " of " + r.logged.length + " hit their goal" : "No results yet") + "</strong>" +
-      (pct == null ? "Set goals in admin to track progress." : pct >= 100 ? "The team is ahead of target." : "Combined progress towards the team\u2019s goals.") + "</p></div>";
+      (fill > 0 ? '<circle cx="40" cy="40" r="34" fill="none" stroke="' + (pct >= 100 ? "#56DDA6" : "url(#rg)") + '" stroke-width="8" stroke-linecap="round" stroke-dasharray="' +
+      (C * fill).toFixed(1) + " " + C.toFixed(1) + '"/>' : "") + '</svg><b class="num">' + (pct == null ? "\u2013" : pct + "%") + "</b></div>" +
+      "<p><strong>" + hitCount + " of " + total + " hit their goal</strong>" +
+      (pct == null ? "Set goals in admin to track progress." : pct >= 100 ? "The team is ahead of target." : !r.logged.length ? "Progress fills in as people log." : "Combined progress towards the team\u2019s goals.") + "</p></div>";
 
     // Show metrics shared by two or more people first; fall back to whatever was logged.
     var shared = totals.filter(function (t) { return t.people.length >= 2; });
@@ -342,7 +346,7 @@
   function renderSheet(fresh) {
     var p = m.byId[openId];
     if (!p) { closeSheet(); return; }
-    var s = D.score(m, p.id, sel);
+    var s = D.scoreOrGoals(m, p, sel);
     var hist = D.history(m, p.id, null);
     var hit = s && s.pct != null && s.pct >= 100;
 

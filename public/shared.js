@@ -92,14 +92,27 @@ window.DH = (function () {
     return { lines: lines, pct: pctOf(lines), sessions: n };
   }
 
-  function rank(m, sid) {
-    var rows = m.people.map(function (p) { return { p: p, s: score(m, p.id, sid) }; });
-    var logged = rows.filter(function (r) { return r.s; }).sort(function (x, y) {
-      var xp = x.s.pct == null ? -1 : x.s.pct, yp = y.s.pct == null ? -1 : y.s.pct;
-      return (yp - xp) || x.p.name.localeCompare(y.p.name);
+  // A person's current goals with nothing logged yet, so the board can show targets before anyone logs.
+  function goalsOnly(p) {
+    var lines = p.metrics.filter(function (a) { return a.goal > 0; }).map(function (a) {
+      return { metricId: a.metricId, value: 0, goal: a.goal };
     });
-    var absent = rows.filter(function (r) { return !r.s && r.p.active && r.p.metrics.some(function (a) { return a.goal > 0; }); }).map(function (r) { return r.p; });
-    return { logged: logged, absent: absent };
+    return lines.length ? { lines: lines, pct: 0, sessions: 0, empty: true } : null;
+  }
+  function scoreOrGoals(m, p, sid) {
+    return score(m, p.id, sid) || (p.active ? goalsOnly(p) : null);
+  }
+
+  // Everyone with goals is ranked; people who haven't logged yet show their goals at 0% after everyone else.
+  function rank(m, sid) {
+    var rows = m.people.map(function (p) { return { p: p, s: scoreOrGoals(m, p, sid) }; })
+      .filter(function (r) { return r.s; })
+      .sort(function (x, y) {
+        if (!!x.s.empty !== !!y.s.empty) return x.s.empty ? 1 : -1;
+        var xp = x.s.pct == null ? -1 : x.s.pct, yp = y.s.pct == null ? -1 : y.s.pct;
+        return (yp - xp) || x.p.name.localeCompare(y.p.name);
+      });
+    return { rows: rows, logged: rows.filter(function (r) { return !r.s.empty; }) };
   }
 
   // Per-session scores for a person, oldest first, optionally up to a session.
@@ -157,7 +170,7 @@ window.DH = (function () {
 
   return {
     esc: esc, avatar: avatar, fmtDate: fmtDate, todayISO: todayISO, model: model, entry: entry,
-    metricColor: metricColor, metricName: metricName, pctOf: pctOf, score: score, rank: rank,
+    metricColor: metricColor, metricName: metricName, pctOf: pctOf, score: score, scoreOrGoals: scoreOrGoals, rank: rank,
     history: history, streak: streak, teamTotals: teamTotals, api: api
   };
 })();
