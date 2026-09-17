@@ -59,6 +59,10 @@
     var s = sessionById(sel);
     return (s.id === m.desc[0].id && !long ? "Latest session" : D.fmtDate(s.date, long));
   }
+  // "Cold calls" -> "cold calls", but keep words like "LinkedIn" or "CRM" as written.
+  function softLower(s) {
+    return /^[A-Z][a-z]/.test(s) && !/^[A-Z][a-z]+[A-Z]/.test(s) ? s[0].toLowerCase() + s.slice(1) : s;
+  }
   function firstName(p) {
     var parts = p.name.split(/\s+/);
     return parts.length > 1 ? parts[0] + " " + parts[parts.length - 1][0] + "." : p.name;
@@ -196,18 +200,19 @@
       shared.slice(0, 3).forEach(function (t) {
         var best = Math.max.apply(null, t.people.map(function (x) { return x.value; }));
         var who = t.people.filter(function (x) { return x.value === best; });
-        if (best > 0 && who.length === 1) items.push(["Most " + D.metricName(m, t.metricId).toLowerCase(), "", who[0].p]);
+        if (best > 0 && who.length === 1) items.push({ label: "Most " + softLower(D.metricName(m, t.metricId)), value: String(best), p: who[0].p });
       });
       var streakTop = null, streakN = 1;
       r.logged.forEach(function (x) {
         var n = D.streak(m, x.p.id, sel === "all" ? null : sel);
         if (n > streakN) { streakN = n; streakTop = x.p; }
       });
-      if (streakTop) items.push(["Best streak", streakN + " in a row", streakTop]);
+      if (streakTop) items.push({ label: "Best goal streak", value: streakN + " in a row", p: streakTop });
       if (items.length) {
         h += '<div class="side-sec">Highlights</div><ul class="pills">' + items.map(function (it) {
-          return '<li class="prow"><span class="pk"><span class="pn-t">' + esc(it[0]) + "</span>" + (it[1] ? " <small>" + esc(it[1]) + "</small>" : "") +
-            '</span><button class="wv" data-open="' + it[2].id + '">' + esc(firstName(it[2])) + "</button></li>";
+          return '<li><button class="prow hlrow" data-open="' + it.p.id + '">' + D.avatar(it.p, "sm") +
+            '<span class="hl-who"><b>' + esc(firstName(it.p)) + "</b><small>" + esc(it.label) + "</small></span>" +
+            '<span class="hl-v num">' + esc(it.value) + "</span></button></li>";
         }).join("") + "</ul>";
       }
     }
