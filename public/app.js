@@ -184,7 +184,7 @@
 
   function sideHTML(r) {
     var totals = D.teamTotals(m, r.rows);
-    var pct = D.pctOf(totals);
+    var pct = D.pooledPct(totals);
     var hitCount = r.logged.filter(function (x) { return x.s.pct != null && x.s.pct >= 100; }).length;
     var total = r.rows.length;
     var C = 2 * Math.PI * 34, fill = pct == null ? 0 : Math.min(pct, 100) / 100;
@@ -203,7 +203,7 @@
       (fill > 0 ? '<circle cx="40" cy="40" r="34" fill="none" stroke="' + (pct >= 100 ? "#56DDA6" : "url(#rg)") + '" stroke-width="8" stroke-linecap="round" stroke-dasharray="' +
       (C * fill).toFixed(1) + " " + C.toFixed(1) + '"/>' : "") + '</svg><b class="num">' + (pct == null ? "\u2013" : pct + "%") + "</b></div>" +
       "<p><strong>" + hitCount + " of " + total + " hit their goal</strong>" +
-      (pct == null ? "Set goals in admin to track progress." : pct >= 100 ? "The team is ahead of target." : !r.logged.length ? "Progress fills in as people log." : "Combined progress towards the team\u2019s goals.") + "</p></div>";
+      (pct == null ? "Set goals in admin to track progress." : pct >= 100 ? "The team is ahead of target." : !r.logged.length ? "Progress fills in as people log." : "All activities logged against all goals.") + "</p></div>";
 
     // Show metrics shared by two or more people first; fall back to whatever was logged.
     var shared = totals.filter(function (t) { return t.people.length >= 2; });

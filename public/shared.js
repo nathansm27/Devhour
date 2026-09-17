@@ -146,6 +146,13 @@ window.DH = (function () {
     });
   }
 
+  // Team %: every activity logged added up, divided by every goal added up (uncapped).
+  function pooledPct(totals) {
+    var v = 0, g = 0;
+    totals.forEach(function (t) { if (t.goal > 0) { v += t.value; g += t.goal; } });
+    return g > 0 ? Math.round(100 * v / g) : null;
+  }
+
   // API: every route is served by one function at /api/router.
   function api(path, opts) {
     opts = opts || {};
@@ -171,6 +178,6 @@ window.DH = (function () {
   return {
     esc: esc, avatar: avatar, fmtDate: fmtDate, todayISO: todayISO, model: model, entry: entry,
     metricColor: metricColor, metricName: metricName, pctOf: pctOf, score: score, scoreOrGoals: scoreOrGoals, rank: rank,
-    history: history, streak: streak, teamTotals: teamTotals, api: api
+    history: history, streak: streak, teamTotals: teamTotals, pooledPct: pooledPct, api: api
   };
 })();

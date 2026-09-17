@@ -56,6 +56,7 @@ The database tables are created automatically on the first request.
   - Five wrong PINs lock that person out for 15 minutes.
   - "New PIN" signs them out on every device.
 - **Scoring:** each score averages that person's metrics against their goals, each capped at 200%, so people tracking different things can share one leaderboard.
+- **Team %:** every activity logged added up, divided by every goal added up (not capped).
 - **Goals and history:** goals are copied onto each number when it's first logged, so changing a goal later doesn't rewrite past sessions. "Use current goals" re-applies everyone's current goals to one session.
 - **Removing things:**
   - Removing a metric from one person keeps their past numbers.
