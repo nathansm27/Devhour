@@ -1,11 +1,9 @@
 // Development hour tracker API (Vercel Function, Node.js runtime).
 // All routes go through /api/router?path=<route>.
-// Storage: any Postgres database. On Vercel, connect Neon from the Storage tab,
-// which sets DATABASE_URL automatically.
+// Storage: Postgres (Neon on Vercel sets DATABASE_URL).
 
 import postgres from "postgres";
 
-const METRICS = ["calls", "meetings", "signups"];
 const TOKEN_DAYS = 30;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -30,17 +28,27 @@ CREATE TABLE IF NOT EXISTS dh_sessions (
   seq BIGSERIAL,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
-CREATE TABLE IF NOT EXISTS dh_results (
+CREATE TABLE IF NOT EXISTS dh_metrics (
+  id UUID PRIMARY KEY,
+  name TEXT NOT NULL,
+  seq BIGSERIAL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE TABLE IF NOT EXISTS dh_person_metrics (
+  person_id UUID NOT NULL REFERENCES dh_people(id) ON DELETE CASCADE,
+  metric_id UUID NOT NULL REFERENCES dh_metrics(id) ON DELETE CASCADE,
+  goal INTEGER NOT NULL DEFAULT 0,
+  seq BIGSERIAL,
+  PRIMARY KEY (person_id, metric_id)
+);
+CREATE TABLE IF NOT EXISTS dh_entries (
   session_id UUID NOT NULL REFERENCES dh_sessions(id) ON DELETE CASCADE,
   person_id UUID NOT NULL REFERENCES dh_people(id) ON DELETE CASCADE,
-  calls INTEGER,
-  meetings INTEGER,
-  signups INTEGER,
-  goal_calls INTEGER NOT NULL DEFAULT 0,
-  goal_meetings INTEGER NOT NULL DEFAULT 0,
-  goal_signups INTEGER NOT NULL DEFAULT 0,
+  metric_id UUID NOT NULL REFERENCES dh_metrics(id) ON DELETE CASCADE,
+  value INTEGER NOT NULL,
+  goal INTEGER NOT NULL DEFAULT 0,
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-  PRIMARY KEY (session_id, person_id)
+  PRIMARY KEY (session_id, person_id, metric_id)
 );`;
 
 class HttpError extends Error {
@@ -57,11 +65,47 @@ function db() {
   return globalThis.__dhSql;
 }
 
+// Version 1 stored fixed calls/meetings/sign-ups columns in dh_results.
+// Copy that data into the flexible metric tables once; dh_results is left untouched as a backup.
+async function migrateV1(sql) {
+  await sql.begin(async (tx) => {
+    await tx`SELECT pg_advisory_xact_lock(4242)`;
+    const [done] = await tx`SELECT value FROM dh_settings WHERE key = 'schema_version'`;
+    if (done) return;
+    const [old] = await tx`SELECT to_regclass('dh_results') AS t`;
+    const oldRows = old.t ? await tx`SELECT * FROM dh_results` : [];
+    if (oldRows.length) {
+      const legacy = [["calls", "Calls"], ["meetings", "Meetings"], ["signups", "Sign-ups"]];
+      const ids = {};
+      for (const [key, name] of legacy) {
+        ids[key] = crypto.randomUUID();
+        await tx`INSERT INTO dh_metrics (id, name) VALUES (${ids[key]}, ${name})`;
+      }
+      const people = await tx`SELECT * FROM dh_people ORDER BY seq`;
+      for (const p of people) {
+        for (const [key] of legacy) {
+          await tx`INSERT INTO dh_person_metrics (person_id, metric_id, goal) VALUES (${p.id}, ${ids[key]}, ${p["goal_" + key]})`;
+        }
+      }
+      for (const r of oldRows) {
+        for (const [key] of legacy) {
+          if (r[key] === null) continue;
+          await tx`INSERT INTO dh_entries (session_id, person_id, metric_id, value, goal)
+                   VALUES (${r.session_id}, ${r.person_id}, ${ids[key]}, ${r[key]}, ${r["goal_" + key]})
+                   ON CONFLICT DO NOTHING`;
+        }
+      }
+    }
+    await tx`INSERT INTO dh_settings (key, value) VALUES ('schema_version', '2')`;
+  });
+}
+
 let schemaReady = null;
 function ensureSchema(sql) {
   if (!schemaReady) {
     schemaReady = sql.unsafe(SCHEMA)
       .catch(() => new Promise((r) => setTimeout(r, 300)).then(() => sql.unsafe(SCHEMA))) // two cold starts racing
+      .then(() => migrateV1(sql))
       .catch((e) => { schemaReady = null; throw e; });
   }
   return schemaReady;
@@ -77,16 +121,16 @@ const json = (body, status = 200) =>
 async function readJSON(request) {
   try { return await request.json(); } catch { throw new HttpError(400, "Body must be JSON."); }
 }
-function cleanName(v) {
+function cleanName(v, max = 60) {
   const s = String(v ?? "").trim().replace(/\s+/g, " ");
   if (!s) throw new HttpError(400, "Name is required.");
-  if (s.length > 60) throw new HttpError(400, "Name must be 60 characters or fewer.");
+  if (s.length > max) throw new HttpError(400, `Name must be ${max} characters or fewer.`);
   return s;
 }
 function cleanCount(v, nullable = false) {
   if (v === null || v === undefined || v === "") return nullable ? null : 0;
   const n = Number(v);
-  if (!Number.isFinite(n) || n < 0 || n > 100000) throw new HttpError(400, "Numbers must be between 0 and 100000.");
+  if (!Number.isFinite(n) || n < 0 || n > 1000000) throw new HttpError(400, "Numbers must be between 0 and 1,000,000.");
   return Math.floor(n);
 }
 function cleanDate(v) {
@@ -96,7 +140,12 @@ function cleanDate(v) {
 }
 function cleanId(v, what) {
   if (!v || !UUID.test(v)) throw new HttpError(404, what + " not found.");
-  return v;
+  return v.toLowerCase();
+}
+async function mustExist(sql, table, id, what) {
+  const [row] = await sql`SELECT * FROM ${sql(table)} WHERE id = ${id}`;
+  if (!row) throw new HttpError(404, what + " not found.");
+  return row;
 }
 
 // ---------- auth ----------
@@ -138,29 +187,24 @@ async function checkToken(secret, request) {
 
 // ---------- data ----------
 async function getData(sql) {
-  const [settings, people, sessions, results] = await Promise.all([
+  const [settings, metrics, people, assigned, sessions, entries] = await Promise.all([
     sql`SELECT key, value FROM dh_settings`,
-    sql`SELECT * FROM dh_people ORDER BY seq`,
+    sql`SELECT id, name FROM dh_metrics ORDER BY seq`,
+    sql`SELECT id, name, active FROM dh_people ORDER BY seq`,
+    sql`SELECT person_id, metric_id, goal FROM dh_person_metrics ORDER BY seq`,
     sql`SELECT id, to_char(date, 'YYYY-MM-DD') AS date FROM dh_sessions ORDER BY date DESC, seq DESC`,
-    sql`SELECT * FROM dh_results`,
+    sql`SELECT session_id, person_id, metric_id, value, goal FROM dh_entries`,
   ]);
   const s = Object.fromEntries(settings.map((r) => [r.key, r.value]));
+  const byPerson = {};
+  for (const a of assigned) (byPerson[a.person_id] ||= []).push({ metricId: a.metric_id, goal: a.goal });
   return {
     title: s.title || "Development hour",
-    people: people.map((p) => ({
-      id: p.id,
-      name: p.name,
-      active: p.active,
-      goals: { calls: p.goal_calls, meetings: p.goal_meetings, signups: p.goal_signups },
-    })),
+    metrics: metrics.map((x) => ({ id: x.id, name: x.name })),
+    people: people.map((p) => ({ id: p.id, name: p.name, active: p.active, metrics: byPerson[p.id] || [] })),
     sessions: sessions.map((x) => ({ id: x.id, date: x.date })),
-    results: results.map((r) => ({
-      sessionId: r.session_id,
-      personId: r.person_id,
-      calls: r.calls,
-      meetings: r.meetings,
-      signups: r.signups,
-      goals: { calls: r.goal_calls, meetings: r.goal_meetings, signups: r.goal_signups },
+    entries: entries.map((e) => ({
+      sessionId: e.session_id, personId: e.person_id, metricId: e.metric_id, value: e.value, goal: e.goal,
     })),
     updatedAt: new Date().toISOString(),
   };
@@ -181,40 +225,79 @@ async function admin(request, sql, parts) {
     return json({ title });
   }
 
+  // Metric library
+  if (resource === "metrics") {
+    if (method === "POST" && !rawId) {
+      const body = await readJSON(request);
+      const metric = { id: crypto.randomUUID(), name: cleanName(body.name, 40) };
+      const goal = cleanCount(body.goal);
+      await sql.begin(async (tx) => {
+        await tx`INSERT INTO dh_metrics (id, name) VALUES (${metric.id}, ${metric.name})`;
+        if (body.assignAll) {
+          await tx`INSERT INTO dh_person_metrics (person_id, metric_id, goal)
+                   SELECT id, ${metric.id}, ${goal} FROM dh_people WHERE active ORDER BY seq`;
+        }
+      });
+      return json(metric, 201);
+    }
+    const id = cleanId(rawId, "Metric");
+    await mustExist(sql, "dh_metrics", id, "Metric");
+    if (method === "PATCH") {
+      const body = await readJSON(request);
+      const name = cleanName(body.name, 40);
+      await sql`UPDATE dh_metrics SET name = ${name} WHERE id = ${id}`;
+      return json({ id, name });
+    }
+    if (method === "DELETE") {
+      await sql`DELETE FROM dh_metrics WHERE id = ${id}`; // assignments and logged numbers cascade
+      return json({ ok: true });
+    }
+  }
+
   if (resource === "people") {
     if (method === "POST" && !rawId) {
       const body = await readJSON(request);
-      const g = body.goals || {};
-      const person = {
-        id: crypto.randomUUID(),
-        name: cleanName(body.name),
-        active: true,
-        goals: { calls: cleanCount(g.calls), meetings: cleanCount(g.meetings), signups: cleanCount(g.signups) },
-      };
-      await sql`INSERT INTO dh_people (id, name, goal_calls, goal_meetings, goal_signups)
-                VALUES (${person.id}, ${person.name}, ${person.goals.calls}, ${person.goals.meetings}, ${person.goals.signups})`;
+      const person = { id: crypto.randomUUID(), name: cleanName(body.name), active: true };
+      const copyFrom = body.copyFrom ? cleanId(body.copyFrom, "Person") : null;
+      await sql.begin(async (tx) => {
+        await tx`INSERT INTO dh_people (id, name) VALUES (${person.id}, ${person.name})`;
+        if (copyFrom) {
+          await tx`INSERT INTO dh_person_metrics (person_id, metric_id, goal)
+                   SELECT ${person.id}, metric_id, goal FROM dh_person_metrics WHERE person_id = ${copyFrom} ORDER BY seq`;
+        }
+      });
       return json(person, 201);
     }
     const id = cleanId(rawId, "Person");
-    const [existing] = await sql`SELECT * FROM dh_people WHERE id = ${id}`;
-    if (!existing) throw new HttpError(404, "Person not found.");
+    const existing = await mustExist(sql, "dh_people", id, "Person");
 
-    if (method === "PATCH") {
-      const body = await readJSON(request);
-      const g = body.goals || {};
-      const name = body.name !== undefined ? cleanName(body.name) : existing.name;
-      const goals = {
-        calls: g.calls !== undefined ? cleanCount(g.calls) : existing.goal_calls,
-        meetings: g.meetings !== undefined ? cleanCount(g.meetings) : existing.goal_meetings,
-        signups: g.signups !== undefined ? cleanCount(g.signups) : existing.goal_signups,
-      };
-      const active = body.active !== undefined ? !!body.active : existing.active;
-      await sql`UPDATE dh_people SET name = ${name}, goal_calls = ${goals.calls}, goal_meetings = ${goals.meetings},
-                goal_signups = ${goals.signups}, active = ${active} WHERE id = ${id}`;
-      return json({ id, name, goals, active });
+    // PUT / DELETE /people/:id/metrics/:metricId
+    if (sub === "metrics") {
+      const metricId = cleanId(rawSubId, "Metric");
+      await mustExist(sql, "dh_metrics", metricId, "Metric");
+      if (method === "PUT") {
+        const body = await readJSON(request);
+        const goal = cleanCount(body.goal);
+        await sql`INSERT INTO dh_person_metrics (person_id, metric_id, goal) VALUES (${id}, ${metricId}, ${goal})
+                  ON CONFLICT (person_id, metric_id) DO UPDATE SET goal = EXCLUDED.goal`;
+        return json({ personId: id, metricId, goal });
+      }
+      if (method === "DELETE") {
+        // Past numbers stay in history; the metric just stops appearing for new sessions.
+        await sql`DELETE FROM dh_person_metrics WHERE person_id = ${id} AND metric_id = ${metricId}`;
+        return json({ ok: true });
+      }
     }
-    if (method === "DELETE") {
-      await sql`DELETE FROM dh_people WHERE id = ${id}`; // results cascade
+
+    if (!sub && method === "PATCH") {
+      const body = await readJSON(request);
+      const name = body.name !== undefined ? cleanName(body.name) : existing.name;
+      const active = body.active !== undefined ? !!body.active : existing.active;
+      await sql`UPDATE dh_people SET name = ${name}, active = ${active} WHERE id = ${id}`;
+      return json({ id, name, active });
+    }
+    if (!sub && method === "DELETE") {
+      await sql`DELETE FROM dh_people WHERE id = ${id}`; // assignments and entries cascade
       return json({ ok: true });
     }
   }
@@ -227,33 +310,40 @@ async function admin(request, sql, parts) {
       return json(session, 201);
     }
     const id = cleanId(rawId, "Session");
-    const [existing] = await sql`SELECT id FROM dh_sessions WHERE id = ${id}`;
-    if (!existing) throw new HttpError(404, "Session not found.");
+    await mustExist(sql, "dh_sessions", id, "Session");
 
-    if (sub === "results" && method === "PUT") {
+    // PUT /sessions/:id/entries/:personId  { values: { metricId: number | null } }
+    if (sub === "entries" && method === "PUT") {
       const personId = cleanId(rawSubId, "Person");
-      const [person] = await sql`SELECT * FROM dh_people WHERE id = ${personId}`;
-      if (!person) throw new HttpError(404, "Person not found.");
+      await mustExist(sql, "dh_people", personId, "Person");
       const body = await readJSON(request);
-      const v = {};
-      for (const k of METRICS) v[k] = cleanCount(body[k], true);
-      if (METRICS.every((k) => v[k] === null)) {
-        await sql`DELETE FROM dh_results WHERE session_id = ${id} AND person_id = ${personId}`;
-        return json({ removed: true });
-      }
-      // Goals are snapshotted when a result is first logged, so later goal changes don't rewrite history.
-      await sql`INSERT INTO dh_results
-                  (session_id, person_id, calls, meetings, signups, goal_calls, goal_meetings, goal_signups)
-                VALUES (${id}, ${personId}, ${v.calls}, ${v.meetings}, ${v.signups},
-                        ${person.goal_calls}, ${person.goal_meetings}, ${person.goal_signups})
-                ON CONFLICT (session_id, person_id) DO UPDATE SET
-                  calls = EXCLUDED.calls, meetings = EXCLUDED.meetings, signups = EXCLUDED.signups, updated_at = now()`;
+      const values = body.values && typeof body.values === "object" ? body.values : {};
+      const keys = Object.keys(values);
+      if (keys.length > 50) throw new HttpError(400, "Too many metrics in one save.");
+      await sql.begin(async (tx) => {
+        for (const raw of keys) {
+          const metricId = cleanId(raw, "Metric");
+          const v = cleanCount(values[raw], true);
+          if (v === null) {
+            await tx`DELETE FROM dh_entries WHERE session_id = ${id} AND person_id = ${personId} AND metric_id = ${metricId}`;
+            continue;
+          }
+          // The goal is copied when a number is first logged, so later goal changes don't rewrite history.
+          await tx`INSERT INTO dh_entries (session_id, person_id, metric_id, value, goal)
+                   SELECT ${id}, ${personId}, m.id, ${v},
+                          COALESCE((SELECT goal FROM dh_person_metrics WHERE person_id = ${personId} AND metric_id = m.id), 0)
+                   FROM dh_metrics m WHERE m.id = ${metricId}
+                   ON CONFLICT (session_id, person_id, metric_id)
+                   DO UPDATE SET value = EXCLUDED.value, updated_at = now()`;
+        }
+      });
       return json({ ok: true });
     }
 
     if (sub === "refresh-goals" && method === "POST") {
-      await sql`UPDATE dh_results r SET goal_calls = p.goal_calls, goal_meetings = p.goal_meetings, goal_signups = p.goal_signups
-                FROM dh_people p WHERE p.id = r.person_id AND r.session_id = ${id}`;
+      await sql`UPDATE dh_entries e SET goal = pm.goal
+                FROM dh_person_metrics pm
+                WHERE pm.person_id = e.person_id AND pm.metric_id = e.metric_id AND e.session_id = ${id}`;
       return json({ ok: true });
     }
 
@@ -264,7 +354,7 @@ async function admin(request, sql, parts) {
       return json({ id, date });
     }
     if (!sub && method === "DELETE") {
-      await sql`DELETE FROM dh_sessions WHERE id = ${id}`; // results cascade
+      await sql`DELETE FROM dh_sessions WHERE id = ${id}`; // entries cascade
       return json({ ok: true });
     }
   }
@@ -290,7 +380,7 @@ export async function handle(request) {
     if (parts[0] === "login" && request.method === "POST") {
       if (!secret) throw new HttpError(500, "ADMIN_PASSWORD isn't set in the Vercel project's environment variables.");
       const body = await readJSON(request);
-      if (!(await sameText(String(body.password ?? ""), secret))) {
+      if (!(await sameText(String(body.password ?? "").trim(), secret.trim()))) {
         await new Promise((r) => setTimeout(r, 600));
         throw new HttpError(401, "Wrong password.");
       }

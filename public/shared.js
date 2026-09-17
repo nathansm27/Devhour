@@ -2,16 +2,11 @@
 window.DH = (function () {
   "use strict";
 
-  var METRICS = [
-    { key: "calls", label: "Calls", one: "call", many: "calls" },
-    { key: "meetings", label: "Meetings", one: "meeting", many: "meetings" },
-    { key: "signups", label: "Sign-ups", one: "sign-up", many: "sign-ups" }
-  ];
-  var TRACK_MAX = 125; // the 100% goal marker sits at 80% of a track
   var PALETTE = [
     ["#7C8CFF", "#4B55C9"], ["#B98BFF", "#6D43C7"], ["#57D6B0", "#1F8E7A"], ["#FF9E7A", "#C4523A"],
     ["#FF86B8", "#B63D78"], ["#62C4F5", "#2A73B8"], ["#F7C75C", "#C07E1D"], ["#9AA7C7", "#56617F"]
   ];
+  var METRIC_COLORS = ["#8E9AFF", "#C39BFF", "#56DDA6", "#FFB27A", "#FF8FBF", "#6CCBF7", "#F7CF6A", "#A9B4D6"];
 
   function esc(s) {
     return String(s == null ? "" : s).replace(/[&<>"']/g, function (c) {
@@ -38,55 +33,69 @@ window.DH = (function () {
     var d = new Date();
     return d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0");
   }
-  function plural(n, m) { return n === 1 ? m.one : m.many; }
-  function zero() { return { calls: 0, meetings: 0, signups: 0 }; }
 
   // Build lookup tables from the API payload.
   function model(data) {
     var m = {
       data: data,
+      metrics: data.metrics,
       people: data.people,
       byId: {},
+      metricById: {},
+      metricOrder: {},
       asc: data.sessions.slice().sort(function (a, b) { return a.date.localeCompare(b.date); }),
       desc: data.sessions.slice().sort(function (a, b) { return b.date.localeCompare(a.date); }),
-      res: {}
+      res: {} // "sessionId|personId" -> { metricId: {value, goal} }
     };
     data.people.forEach(function (p) { m.byId[p.id] = p; });
-    data.results.forEach(function (r) { m.res[r.sessionId + "|" + r.personId] = r; });
+    data.metrics.forEach(function (x, i) { m.metricById[x.id] = x; m.metricOrder[x.id] = i; });
+    data.entries.forEach(function (e) {
+      var k = e.sessionId + "|" + e.personId;
+      (m.res[k] = m.res[k] || {})[e.metricId] = { value: e.value, goal: e.goal };
+    });
     return m;
   }
   function entry(m, sid, pid) { return m.res[sid + "|" + pid] || null; }
+  function metricColor(m, id) { return METRIC_COLORS[(m.metricOrder[id] || 0) % METRIC_COLORS.length]; }
+  function metricName(m, id) { return m.metricById[id] ? m.metricById[id].name : "Removed metric"; }
+  function byMetricOrder(m) {
+    return function (a, b) { return (m.metricOrder[a] || 0) - (m.metricOrder[b] || 0); };
+  }
 
-  function pctOf(actual, goal) {
+  // Average of each metric against its goal, each capped at 200%.
+  function pctOf(lines) {
     var ratios = [];
-    METRICS.forEach(function (k) { if (goal[k.key] > 0) ratios.push(Math.min(actual[k.key] / goal[k.key], 2)); });
+    lines.forEach(function (l) { if (l.goal > 0) ratios.push(Math.min(l.value / l.goal, 2)); });
     if (!ratios.length) return null;
     return Math.round(100 * ratios.reduce(function (a, b) { return a + b; }, 0) / ratios.length);
   }
 
-  // Score for one person over one session, or over every session ("all").
+  // Score for one person over one session, or every session ("all").
+  // Returns { lines: [{metricId, value, goal}], pct, sessions } or null when nothing is logged.
   function score(m, pid, sid) {
     var ids = sid === "all" ? m.asc.map(function (s) { return s.id; }) : [sid];
-    var a = zero(), g = zero(), n = 0;
+    var agg = {}, n = 0;
     ids.forEach(function (id) {
       var e = entry(m, id, pid);
       if (!e) return;
       n++;
-      METRICS.forEach(function (k) { a[k.key] += e[k.key] || 0; g[k.key] += (e.goals || {})[k.key] || 0; });
+      Object.keys(e).forEach(function (mid) {
+        var a = agg[mid] || (agg[mid] = { metricId: mid, value: 0, goal: 0 });
+        a.value += e[mid].value; a.goal += e[mid].goal;
+      });
     });
     if (!n) return null;
-    return { actual: a, goal: g, pct: pctOf(a, g), sessions: n };
+    var lines = Object.keys(agg).sort(byMetricOrder(m)).map(function (k) { return agg[k]; });
+    return { lines: lines, pct: pctOf(lines), sessions: n };
   }
 
   function rank(m, sid) {
     var rows = m.people.map(function (p) { return { p: p, s: score(m, p.id, sid) }; });
     var logged = rows.filter(function (r) { return r.s; }).sort(function (x, y) {
       var xp = x.s.pct == null ? -1 : x.s.pct, yp = y.s.pct == null ? -1 : y.s.pct;
-      return (yp - xp) || (y.s.actual.signups - x.s.actual.signups) ||
-        (y.s.actual.meetings - x.s.actual.meetings) || (y.s.actual.calls - x.s.actual.calls) ||
-        x.p.name.localeCompare(y.p.name);
+      return (yp - xp) || x.p.name.localeCompare(y.p.name);
     });
-    var absent = rows.filter(function (r) { return !r.s && r.p.active; }).map(function (r) { return r.p; });
+    var absent = rows.filter(function (r) { return !r.s && r.p.active && r.p.metrics.length; }).map(function (r) { return r.p; });
     return { logged: logged, absent: absent };
   }
 
@@ -94,8 +103,9 @@ window.DH = (function () {
   function history(m, pid, untilSid) {
     var out = [];
     for (var i = 0; i < m.asc.length; i++) {
-      var s = m.asc[i], e = entry(m, s.id, pid);
-      if (e) out.push({ session: s, entry: e, pct: pctOf(e, e.goals || zero()) });
+      var s = m.asc[i];
+      var sc = score(m, pid, s.id);
+      if (sc) out.push({ session: s, score: sc, pct: sc.pct });
       if (untilSid && s.id === untilSid) break;
     }
     return out;
@@ -106,12 +116,25 @@ window.DH = (function () {
     return n;
   }
 
-  // API
+  // Team totals per metric across logged people: [{metricId, value, goal, people}]
+  function teamTotals(m, logged) {
+    var t = {};
+    logged.forEach(function (r) {
+      r.s.lines.forEach(function (l) {
+        var a = t[l.metricId] || (t[l.metricId] = { metricId: l.metricId, value: 0, goal: 0, people: [] });
+        a.value += l.value; a.goal += l.goal; a.people.push({ p: r.p, value: l.value });
+      });
+    });
+    return Object.keys(t).map(function (k) { return t[k]; }).sort(function (a, b) {
+      return (b.people.length - a.people.length) || ((m.metricOrder[a.metricId] || 0) - (m.metricOrder[b.metricId] || 0));
+    });
+  }
+
+  // API: every route is served by one function at /api/router.
   function api(path, opts) {
     opts = opts || {};
     var headers = { "content-type": "application/json" };
     if (opts.token) headers.authorization = "Bearer " + opts.token;
-    // Vercel: every API route is served by one function at /api/router.
     var url = "/api/router?path=" + encodeURIComponent(path.replace(/^\/api\//, ""));
     return fetch(url, {
       method: opts.method || "GET",
@@ -127,8 +150,8 @@ window.DH = (function () {
   }
 
   return {
-    METRICS: METRICS, TRACK_MAX: TRACK_MAX, esc: esc, avatar: avatar, fmtDate: fmtDate, todayISO: todayISO,
-    plural: plural, zero: zero, model: model, entry: entry, pctOf: pctOf, score: score, rank: rank,
-    history: history, streak: streak, api: api
+    esc: esc, avatar: avatar, fmtDate: fmtDate, todayISO: todayISO, model: model, entry: entry,
+    metricColor: metricColor, metricName: metricName, pctOf: pctOf, score: score, rank: rank,
+    history: history, streak: streak, teamTotals: teamTotals, api: api
   };
 })();

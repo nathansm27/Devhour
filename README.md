@@ -1,6 +1,6 @@
 # Development hour tracker
 
-A public leaderboard (`/`) and a password-protected admin page (`/admin`) for tracking calls, meetings booked and sign-ups each development hour. It runs on Vercel, with results stored in a Postgres database (Neon).
+A public leaderboard (`/`) and a password-protected admin page (`/admin`) for tracking each person's own metrics and goals every development hour. It runs on Vercel, with results stored in a Postgres database (Neon).
 
 ## Put it live on Vercel
 
@@ -42,12 +42,16 @@ The database tables are created automatically on the first request.
 
 ## How it works
 
-- **Scoring:** each score averages calls, meetings and sign-ups against that person's goals. Each metric is capped at 200%.
-- **Goals:** saved with each result when it's first logged, so changing a goal later doesn't rewrite past sessions. "Use current goals" re-applies everyone's current goals to one session.
-- **Archiving:** archived people drop off the admin lists but keep their history. Delete removes a person and their results permanently.
+- **Metrics:** create any metrics you like in admin (Metrics panel), then give each person the ones that apply, with their own goal per session.
+- **Scoring:** each score averages that person's metrics against their goals, each capped at 200%, so people tracking different things can share one leaderboard.
+- **Goals and history:** goals are copied onto each number when it's first logged, so changing a goal later doesn't rewrite past sessions. "Use current goals" re-applies everyone's current goals to one session.
+- **Removing things:**
+  - Removing a metric from one person keeps their past numbers.
+  - Deleting a metric removes it, and its numbers, for everyone.
+- **Archiving:** archived people keep their history on the leaderboard.
+- **Upgrading:** data from the first version (fixed calls, meetings and sign-ups) is copied into metrics called Calls, Meetings and Sign-ups on first run. The old table is left in place as a backup.
 - **Refresh:** the leaderboard refreshes every 30 seconds.
-- **Sign-in:** admin sign-in lasts 30 days per device. Changing `ADMIN_PASSWORD` signs everyone out.
-- **Backups:** Neon keeps point-in-time history; you can also export from the Neon console.
+- **Sign-in:** admin sign-in lasts 30 days per device.
 
 ## Files
 

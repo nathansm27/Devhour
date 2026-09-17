@@ -1,6 +1,6 @@
 (function () {
   "use strict";
-  var D = window.DH, esc = D.esc, M = D.METRICS;
+  var D = window.DH, esc = D.esc;
   var REFRESH_MS = 30000;
 
   var m = null, lastJSON = "", sel = null, openId = null, intro = true, lastOk = 0, failed = false;
@@ -82,7 +82,7 @@
     if (r.logged.length) h += podiumHTML(r.logged.slice(0, 3));
     h += boardHTML(r);
     if (r.logged.length) {
-      h += '<p class="foot">Each score averages calls, meetings and sign-ups against that person\u2019s goals. The line under each row fills at 100%.</p>';
+      h += '<p class="foot">Each score averages that person\u2019s metrics against their own goals. The line under each row fills at 100%.</p>';
     }
     var main = $("main");
     main.className = intro ? "intro" : "";
@@ -124,9 +124,8 @@
       return h + '<div class="empty" style="margin:4px 0 6px">' + ICON.empty + "<h2>Nobody logged yet</h2><p>Results for this session haven\u2019t been entered. Check back soon.</p></div></section>";
     }
 
-    var tops = leaders(r.logged);
     h += "<ol>";
-    r.logged.forEach(function (x, i) { h += rowHTML(x, i, tops); });
+    r.logged.forEach(function (x, i) { h += rowHTML(x, i); });
     h += "</ol>";
     if (r.absent.length) {
       h += '<p class="absent">' + (sel === "all" ? "No results yet: " : "Not logged this session: ") +
@@ -135,42 +134,35 @@
     return h + "</section>";
   }
 
-  // Outright leader per metric (ties mean no single leader).
-  function leaders(logged) {
-    var out = {};
-    M.forEach(function (k) {
-      var best = Math.max.apply(null, logged.map(function (x) { return x.s.actual[k.key]; }));
-      var who = logged.filter(function (x) { return x.s.actual[k.key] === best; });
-      out[k.key] = best > 0 && who.length === 1 ? who[0].p : null;
-    });
-    return out;
+  function lineHTML(l, extra) {
+    var met = l.goal > 0 && l.value >= l.goal;
+    return '<span class="' + (met ? "hit " : "") + (extra ? "extra" : "") + '"><i class="dot" style="background:' + D.metricColor(m, l.metricId) + '"></i>' +
+      '<span><b class="num">' + l.value + "</b>" + (l.goal ? '<span class="num">/' + l.goal + "</span>" : "") +
+      '<span class="lbl"> ' + esc(D.metricName(m, l.metricId)) + "</span></span>" +
+      (met ? '<span class="up" aria-label="goal met">\u25B2</span>' : "") + "</span>";
   }
 
-  function rowHTML(x, i, tops) {
+  function rowHTML(x, i) {
     var s = x.s, hit = s.pct != null && s.pct >= 100;
     var w = s.pct == null ? 0 : Math.min(s.pct, 100);
     var badges = "";
     if (hit) badges += '<span class="badge win hide-sm">' + ICON.check + "Goal hit</span>";
     var st = D.streak(m, x.p.id, sel === "all" ? null : sel);
     if (st >= 2) badges += '<span class="badge flame">' + ICON.flame + st + " in a row</span>";
-    if (tops.signups === x.p) badges += '<span class="badge gold">' + ICON.star + "Top closer</span>";
+    var extraCount = Math.max(0, s.lines.length - 3);
     return '<li><button class="row r' + (i + 1) + '" data-open="' + x.p.id + '">' +
       '<span class="rk num">' + (i + 1) + "</span>" + D.avatar(x.p) +
       '<span class="who"><span class="nm-line"><span class="nm">' + esc(x.p.name) + "</span>" + badges + "</span>" +
-      '<span class="sub">' + M.map(function (k) {
-        var a = s.actual[k.key], g = s.goal[k.key], met = g > 0 && a >= g;
-        return '<span class="' + (met ? "hit" : "") + '"><i class="dot ' + k.key + '"></i><span><b class="num">' + a + "</b>" +
-          (g ? '<span class="num">/' + g + "</span>" : "") + '<span class="lbl"> ' + D.plural(a, k) + "</span></span>" + (met ? '<span class="up" aria-label="goal met">\u25B2</span>' : "") + "</span>";
-      }).join("") + "</span></span>" +
+      '<span class="sub">' + s.lines.map(function (l, j) { return lineHTML(l, j >= 3); }).join("") +
+      (extraCount ? '<span class="more-sm">+' + extraCount + " more</span>" : "") + "</span></span>" +
       '<span class="sc' + (s.pct == null ? " none" : hit ? " hit" : "") + '"><small>Score</small><b class="num">' + (s.pct == null ? "No goals" : s.pct + "%") + "</b></span>" +
       '<span class="prog" aria-hidden="true"><i class="' + (hit ? "hit" : "") + '" style="width:' + w + "%;animation-delay:" + (i * 60) + 'ms"></i></span>' +
       "</button></li>";
   }
 
   function sideHTML(r) {
-    var a = D.zero(), g = D.zero();
-    r.logged.forEach(function (x) { M.forEach(function (k) { a[k.key] += x.s.actual[k.key]; g[k.key] += x.s.goal[k.key]; }); });
-    var pct = D.pctOf(a, g);
+    var totals = D.teamTotals(m, r.logged);
+    var pct = D.pctOf(totals);
     var hitCount = r.logged.filter(function (x) { return x.s.pct != null && x.s.pct >= 100; }).length;
     var total = r.logged.length + r.absent.length;
     var C = 2 * Math.PI * 34, fill = pct == null ? 0 : Math.min(pct, 100) / 100;
@@ -189,27 +181,32 @@
       "<p><strong>" + (r.logged.length ? hitCount + " of " + r.logged.length + " hit their goal" : "No results yet") + "</strong>" +
       (pct == null ? "Set goals in admin to track progress." : pct >= 100 ? "The team is ahead of target." : "Combined progress towards the team\u2019s goals.") + "</p></div>";
 
-    h += '<ul class="pills">' + M.map(function (k) {
-      return '<li class="prow fill"><span class="pk"><i class="dot ' + k.key + '"></i>' + k.label + '</span><span class="pv num">' + a[k.key] +
-        (g[k.key] ? " <small>/ " + g[k.key] + "</small>" : "") + "</span></li>";
-    }).join("") + "</ul>";
+    // Show metrics shared by two or more people first; fall back to whatever was logged.
+    var shared = totals.filter(function (t) { return t.people.length >= 2; });
+    var tiles = (shared.length ? shared : totals).slice(0, 4);
+    if (tiles.length) {
+      h += '<ul class="pills">' + tiles.map(function (t) {
+        return '<li class="prow fill"><span class="pk"><i class="dot" style="background:' + D.metricColor(m, t.metricId) + '"></i><span class="pn-t">' +
+          esc(D.metricName(m, t.metricId)) + '</span></span><span class="pv num">' + t.value + (t.goal ? " <small>/ " + t.goal + "</small>" : "") + "</span></li>";
+      }).join("") + "</ul>";
+    }
 
     if (r.logged.length) {
-      var tops = leaders(r.logged);
+      var items = [];
+      shared.slice(0, 3).forEach(function (t) {
+        var best = Math.max.apply(null, t.people.map(function (x) { return x.value; }));
+        var who = t.people.filter(function (x) { return x.value === best; });
+        if (best > 0 && who.length === 1) items.push(["Most " + D.metricName(m, t.metricId).toLowerCase(), "", who[0].p]);
+      });
       var streakTop = null, streakN = 1;
       r.logged.forEach(function (x) {
         var n = D.streak(m, x.p.id, sel === "all" ? null : sel);
         if (n > streakN) { streakN = n; streakTop = x.p; }
       });
-      var items = [
-        ["Top closer", "", tops.signups],
-        ["Most calls", "", tops.calls],
-        ["Most meetings", "", tops.meetings],
-        ["Best streak", streakTop ? streakN + " in a row" : "", streakTop]
-      ].filter(function (it) { return it[2]; });
+      if (streakTop) items.push(["Best streak", streakN + " in a row", streakTop]);
       if (items.length) {
         h += '<div class="side-sec">Highlights</div><ul class="pills">' + items.map(function (it) {
-          return '<li class="prow"><span class="pk">' + esc(it[0]) + (it[1] ? " <small>" + esc(it[1]) + "</small>" : "") +
+          return '<li class="prow"><span class="pk"><span class="pn-t">' + esc(it[0]) + "</span>" + (it[1] ? " <small>" + esc(it[1]) + "</small>" : "") +
             '</span><button class="wv" data-open="' + it[2].id + '">' + esc(firstName(it[2])) + "</button></li>";
         }).join("") + "</ul>";
       }
@@ -249,31 +246,36 @@
     } else {
       h += '<div class="sh-score' + (hit ? " hit" : "") + '"><strong class="num">' + (s.pct == null ? "\u2013" : s.pct + "%") +
         "</strong><span>" + (s.pct == null ? "no goals set" : "of goal") + "</span></div>";
-      h += M.map(function (k) {
-        var a = s.actual[k.key], g = s.goal[k.key], w = g ? Math.min(a / g, 1) * 100 : 0;
-        return '<div class="mrow"><span class="l"><i class="dot ' + k.key + '"></i>' + k.label + '</span><span class="b"><i style="width:' +
-          w.toFixed(1) + "%;background:var(--" + k.key + ')"></i></span><span class="v"><b>' + a + "</b>" + (g ? " <small>/ " + g + "</small>" : "") + "</span></div>";
+      h += s.lines.map(function (l) {
+        var w = l.goal ? Math.min(l.value / l.goal, 1) * 100 : 0, col = D.metricColor(m, l.metricId);
+        return '<div class="mrow"><span class="l"><i class="dot" style="background:' + col + '"></i><span class="pn-t">' + esc(D.metricName(m, l.metricId)) +
+          '</span></span><span class="b"><i style="width:' + w.toFixed(1) + "%;background:" + col + '"></i></span><span class="v"><b>' + l.value + "</b>" +
+          (l.goal ? " <small>/ " + l.goal + "</small>" : "") + "</span></div>";
       }).join("");
     }
 
     if (hist.length) {
       var best = hist.reduce(function (b, x) { return x.pct != null && (b == null || x.pct > b) ? x.pct : b; }, null);
-      var totalSign = hist.reduce(function (t, x) { return t + (x.entry.signups || 0); }, 0);
+      var hits = hist.filter(function (x) { return x.pct != null && x.pct >= 100; }).length;
       h += '<div class="hl">' +
         "<div><strong>" + D.streak(m, p.id, null) + "</strong><span>Goal streak</span></div>" +
         "<div><strong>" + (best == null ? "\u2013" : best + "%") + "</strong><span>Best session</span></div>" +
         "<div><strong>" + hist.length + "</strong><span>Sessions</span></div>" +
-        "<div><strong>" + totalSign + "</strong><span>Total sign-ups</span></div></div>";
+        "<div><strong>" + hits + "</strong><span>Goals hit</span></div></div>";
 
       h += '<h3 class="sh-sec">Score by session</h3>' + sparkHTML(hist.slice(-12));
 
+      var cols = [];
+      hist.forEach(function (x) { x.score.lines.forEach(function (l) { if (cols.indexOf(l.metricId) < 0) cols.push(l.metricId); }); });
+      cols.sort(function (a, b) { return (m.metricOrder[a] || 0) - (m.metricOrder[b] || 0); });
       h += '<h3 class="sh-sec">History</h3><div class="hist"><table><thead><tr><th>Session</th>' +
-        M.map(function (k) { return "<th>" + k.label + "</th>"; }).join("") + "<th>Score</th></tr></thead><tbody>";
+        cols.map(function (c) { return "<th>" + esc(D.metricName(m, c)) + "</th>"; }).join("") + "<th>Score</th></tr></thead><tbody>";
       hist.slice().reverse().forEach(function (x) {
-        var e = x.entry, g = e.goals || D.zero();
-        h += "<tr><td>" + esc(D.fmtDate(x.session.date)) + "</td>" + M.map(function (k) {
-          var v = e[k.key] || 0, gv = g[k.key] || 0;
-          return '<td class="' + (gv && v >= gv ? "hit" : "") + '">' + v + (gv ? " <small>/ " + gv + "</small>" : "") + "</td>";
+        var e = D.entry(m, x.session.id, p.id);
+        h += "<tr><td>" + esc(D.fmtDate(x.session.date)) + "</td>" + cols.map(function (c) {
+          var l = e[c];
+          if (!l) return '<td><small>\u2013</small></td>';
+          return '<td class="' + (l.goal && l.value >= l.goal ? "hit" : "") + '">' + l.value + (l.goal ? " <small>/ " + l.goal + "</small>" : "") + "</td>";
         }).join("") + '<td class="' + (x.pct >= 100 ? "hit" : "") + '">' + (x.pct == null ? "\u2013" : x.pct + "%") + "</td></tr>";
       });
       h += "</tbody></table></div>";
