@@ -173,7 +173,7 @@
   }
 
   function resultsPanel() {
-    var h = '<section class="panel"><h2>Log results</h2><p class="hint">Numbers save as you type. Leave a box blank if it doesn\u2019t apply. Metrics with no goal aren\u2019t shown on the leaderboard.</p>';
+    var h = '<section class="panel"><h2>Log results</h2><p class="hint">Numbers save as you type. Once someone has any number in, blank boxes count as 0. Clear all their boxes to take them out of the session. Metrics with no goal aren\u2019t shown on the leaderboard.</p>';
     h += '<div class="bar">';
     if (m.desc.length) {
       h += '<label for="sessionSel" class="sr">Session</label><select class="field grow" id="sessionSel">' + m.desc.map(function (s) {
@@ -311,7 +311,14 @@
     var inputs = root.querySelectorAll('[data-entry="' + pid + '"]');
     Array.prototype.forEach.call(inputs, function (inp) { values[inp.getAttribute("data-metric")] = readInt(inp.value); });
     var p = m.byId[pid];
-    data.entries = data.entries.filter(function (e) { return !(e.sessionId === cur && e.personId === pid && values[e.metricId] === null); });
+    // Mirror the server: blanks count as 0 once anything is logged; all blank removes the person from the session.
+    var allBlank = Object.keys(values).every(function (k) { return values[k] === null; });
+    data.entries = data.entries.filter(function (e) {
+      return !(e.sessionId === cur && e.personId === pid && (allBlank || values[e.metricId] === null));
+    });
+    if (!allBlank) p.metrics.forEach(function (a) {
+      if (a.goal > 0 && values[a.metricId] === null) data.entries.push({ sessionId: cur, personId: pid, metricId: a.metricId, value: 0, goal: a.goal });
+    });
     Object.keys(values).forEach(function (mid) {
       if (values[mid] === null) return;
       var e = data.entries.filter(function (x) { return x.sessionId === cur && x.personId === pid && x.metricId === mid; })[0];

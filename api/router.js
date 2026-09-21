@@ -138,8 +138,11 @@ async function migrate(sql) {
     const noPin = await tx`SELECT id FROM dh_people WHERE pin IS NULL`;
     for (const p of noPin) await tx`UPDATE dh_people SET pin = ${newPin()} WHERE id = ${p.id}`;
 
-    if (version < 3) {
-      await tx`INSERT INTO dh_settings (key, value) VALUES ('schema_version', '3')
+    if (version < 4) {
+      // Before v4 a blank box was skipped, which inflated scores. Fill blanks in with 0.
+      const pairs = await tx`SELECT DISTINCT session_id, person_id FROM dh_entries`;
+      for (const pr of pairs) await settlePerson(tx, pr.session_id, pr.person_id, false);
+      await tx`INSERT INTO dh_settings (key, value) VALUES ('schema_version', '4')
                ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`;
     }
   });
@@ -193,6 +196,19 @@ function newPin() {
 // Today's date in London as YYYY-MM-DD.
 function londonToday() {
   return new Intl.DateTimeFormat("en-CA", { timeZone: "Europe/London", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date());
+}
+// Blank boxes count as 0: once a person has logged anything in a session, every metric
+// they have a goal for gets an entry (0 if not filled in). If everything is cleared, they're
+// removed from the session entirely.
+async function settlePerson(tx, sessionId, personId, allBlank) {
+  if (allBlank) {
+    await tx`DELETE FROM dh_entries WHERE session_id = ${sessionId} AND person_id = ${personId}`;
+    return;
+  }
+  await tx`INSERT INTO dh_entries (session_id, person_id, metric_id, value, goal)
+           SELECT ${sessionId}, ${personId}, metric_id, 0, goal FROM dh_person_metrics
+           WHERE person_id = ${personId} AND goal > 0
+           ON CONFLICT (session_id, person_id, metric_id) DO NOTHING`;
 }
 function slugify(name) {
   return name.toLowerCase().normalize("NFKD").replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 40) || "team";
@@ -335,6 +351,8 @@ async function self(request, sql, secret, parts) {
                  ON CONFLICT (session_id, person_id, metric_id)
                  DO UPDATE SET value = EXCLUDED.value, updated_at = now()`;
       }
+      const allBlank = keys.every((k) => cleanCount(values[k], true) === null);
+      await settlePerson(tx, session.id, person.id, allBlank);
       return session.id;
     });
     return json({ sessionId, date: today });
@@ -547,6 +565,10 @@ async function admin(request, sql, parts) {
                    FROM dh_metrics m WHERE m.id = ${metricId}
                    ON CONFLICT (session_id, person_id, metric_id)
                    DO UPDATE SET value = EXCLUDED.value, updated_at = now()`;
+        }
+        if (keys.length) {
+          const allBlank = keys.every((k) => cleanCount(values[k], true) === null);
+          await settlePerson(tx, id, personId, allBlank);
         }
       });
       return json({ ok: true });
