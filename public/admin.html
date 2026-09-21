@@ -99,6 +99,14 @@
 .linkrow { display: flex; gap: 8px; min-width: 0; }
 .linkrow .field { flex: 1; min-width: 0; color: var(--brand-ink); }
 @media (max-width: 560px) { .setrow { grid-template-columns: 1fr; gap: 6px; } }
+.photobox { display: grid; grid-template-columns: 180px minmax(0, 1fr); gap: 14px; margin: 4px 0 16px; padding: 12px; border-radius: 16px; border: 1px solid var(--line); background: rgba(8, 12, 26, .35); }
+.pb-media { height: 130px; border-radius: 12px; overflow: hidden; background: #0B1226; display: grid; place-items: center; color: var(--faint); font-size: .8125rem; }
+.pb-media img { width: 100%; height: 100%; object-fit: cover; }
+.pb-body { display: grid; gap: 8px; align-content: start; min-width: 0; }
+.pb-win { font-size: .875rem; color: var(--muted); }
+.pb-body .hint { color: var(--faint); font-size: .8125rem; }
+.pb-win b { color: var(--ink); }
+@media (max-width: 560px) { .photobox { grid-template-columns: 1fr; } .pb-media { height: 180px; } }
 .empty-note { border: 1px dashed var(--line-strong); background: var(--soft); border-radius: 14px; padding: 16px; color: var(--muted); font-size: .9375rem; }
 
 /* status */

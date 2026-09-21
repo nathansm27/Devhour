@@ -14,6 +14,8 @@
     star: '<svg viewBox="0 0 12 12" aria-hidden="true"><path fill="currentColor" d="m6 .8 1.6 3.3 3.6.5-2.6 2.5.6 3.6L6 9l-3.2 1.7.6-3.6L.8 4.6l3.6-.5z"/></svg>',
     crown: '<svg class="crown" viewBox="0 0 30 22" aria-hidden="true"><path fill="#FFCF5C" d="M2 6.5 8.5 12 15 2l6.5 10L28 6.5 25.5 20h-21z"/><circle cx="2" cy="5.5" r="2" fill="#FFCF5C"/><circle cx="28" cy="5.5" r="2" fill="#FFCF5C"/><circle cx="15" cy="2" r="2" fill="#FFCF5C"/></svg>',
     close: '<svg viewBox="0 0 16 16" aria-hidden="true"><path stroke="currentColor" stroke-width="2" stroke-linecap="round" d="m3.5 3.5 9 9m0-9-9 9"/></svg>',
+    camera: '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 8h3l2-3h6l2 3h3v11H4z"/><circle cx="12" cy="13" r="3.5"/></svg>',
+    crownSm: '<svg viewBox="0 0 30 22" width="16" height="12" aria-hidden="true"><path fill="#FFCF5C" d="M2 6.5 8.5 12 15 2l6.5 10L28 6.5 25.5 20h-21z"/></svg>',
     list: '<svg viewBox="0 0 16 16" aria-hidden="true"><rect x="2" y="2.5" width="12" height="11" rx="2.5" fill="none" stroke="currentColor" stroke-width="1.4"/><path d="M5 6h6M5 9h4" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>',
     trophy: '<svg viewBox="0 0 34 34" aria-hidden="true"><defs><linearGradient id="tg" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#C9CEFF"/><stop offset="1" stop-color="#6E7AEE"/></linearGradient></defs><path fill="url(#tg)" d="M9 4h16v6.5a8 8 0 0 1-16 0z"/><path fill="none" stroke="#9AA4FF" stroke-width="2" d="M9 7H5.5a3.5 3.5 0 0 0 3.8 5.4M25 7h3.5a3.5 3.5 0 0 1-3.8 5.4"/><rect x="15" y="18" width="4" height="6" fill="#7E8AF2"/><rect x="10.5" y="24" width="13" height="5" rx="1.6" fill="url(#tg)"/></svg>',
     empty: '<svg width="64" height="64" viewBox="0 0 64 64" aria-hidden="true"><rect width="64" height="64" rx="20" fill="rgba(142,154,255,.14)"/><rect x="16" y="34" width="8" height="14" rx="3" fill="#8E9AFF" opacity=".35"/><rect x="28" y="26" width="8" height="22" rx="3" fill="#8E9AFF" opacity=".6"/><rect x="40" y="16" width="8" height="32" rx="3" fill="#8E9AFF"/></svg>'
@@ -56,6 +58,7 @@
   function readHash() {
     var h = decodeURIComponent(location.hash.slice(1));
     if (h === "all") return "all";
+    if (h === "winners" && m && m.desc.length) return "winners";
     if (m && m.desc.some(function (s) { return s.id === h; })) return h;
     // With no sessions yet, show today (everyone's goals at zero).
     if (!m || !m.desc.length) return "today";
@@ -74,7 +77,7 @@
   function sessionById(id) { return m.desc.filter(function (s) { return s.id === id; })[0]; }
   function selLabel(long) {
     if (sel === "today") return long ? "Today, " + D.fmtDate(londonToday(), true) : "Today";
-    if (sel === "all") return "All time";
+    if (sel === "all" || sel === "winners") return "All time";
     var s = sessionById(sel);
     return (s.id === m.desc[0].id && !long ? "Latest session" : D.fmtDate(s.date, long));
   }
@@ -98,6 +101,16 @@
       return '<a href="' + href + '"' + (t.id === m.data.team.id ? ' aria-current="page"' : "") + ">" + esc(t.name) + "</a>";
     }).join("");
     sel = readHash();
+
+    if (sel === "winners") {
+      var main0 = $("main");
+      main0.className = "";
+      main0.innerHTML = winnersHTML();
+      $("side").innerHTML = hallHTML();
+      intro = false;
+      if (openId && !sheetBusy()) renderSheet(false);
+      return;
+    }
 
     var r = D.rank(m, sel);
     if (!r.rows.length) {
@@ -147,8 +160,7 @@
       }).join("") + "</select>";
     }
     if (mode !== "today") {
-      h += '<div class="seg" role="group" aria-label="Period"><button data-mode="session" aria-pressed="' + (mode === "session") + '">Session</button>' +
-        '<button data-mode="all" aria-pressed="' + (mode === "all") + '">All time</button></div>';
+      h += segHTML(mode);
     }
     h += "</div></div>";
 
@@ -242,6 +254,123 @@
     return h + "</div>";
   }
 
+  // ---------- winners ----------
+  function segHTML(mode) {
+    return '<div class="seg" role="group" aria-label="View"><button data-mode="session" aria-pressed="' + (mode === "session") + '">Session</button>' +
+      '<button data-mode="all" aria-pressed="' + (mode === "all") + '">All time</button>' +
+      '<button data-mode="winners" aria-pressed="' + (mode === "winners") + '">Winners</button></div>';
+  }
+  // Sessions up to today that have a winner, newest first.
+  function wonSessions() {
+    var today = londonToday();
+    return m.desc.filter(function (x) { return x.date <= today; })
+      .map(function (x) { return { session: x, w: D.winners(m, x.id) }; })
+      .filter(function (x) { return x.w; });
+  }
+  function names(people, short) {
+    return people.map(function (p) { return short ? firstName(p) : p.name; }).join(" & ");
+  }
+  function photoButton(x, big) {
+    // Winners can add (or change) their session's photo once unlocked with their PIN on this device.
+    var unlocked = x.w.people.filter(function (p) { return selfToken(p.id); })[0];
+    if (x.session.photo && !unlocked) return "";
+    var who = unlocked || x.w.people[0];
+    var label = x.session.photo ? "Change photo" : unlocked ? "Add your photo" : "Winner? Add your photo";
+    return '<button class="btn ' + (big ? "primary" : "") + ' photobtn" data-act="add-photo" data-sid="' + x.session.id + '" data-id="' + who.id + '">' +
+      ICON.camera + esc(label) + "</button>";
+  }
+  function winnersHTML() {
+    var list = wonSessions();
+    var h = '<section class="winners"><div class="board-bar"><span class="bt">' + ICON.list + "Winners</span>" +
+      '<div class="ctrls">' + segHTML("winners") + "</div></div>";
+    if (!list.length) {
+      return h + '<div class="empty" style="margin-top:4px">' + ICON.empty + "<h2>No winners yet</h2><p>Winners appear here after each session.</p></div></section>";
+    }
+    var x = list[0], p0 = x.w.people[0], url = D.photoUrl(x.session);
+    h += '<article class="hero-win">' +
+      '<div class="hw-media">' + (url ? '<img src="' + esc(url) + '" alt="' + esc(names(x.w.people)) + ', winner on ' + esc(D.fmtDate(x.session.date)) + '">' :
+        '<div class="hw-noimg">' + D.avatar(p0, "xl") + "</div>") +
+      '<span class="hw-tag">' + ICON.crownSm + (x.w.people.length > 1 ? "Joint winners" : "Latest winner") + "</span></div>" +
+      '<div class="hw-body"><div class="hw-who">' + D.avatar(p0, "lg") + '<div><button class="hw-name" data-open="' + p0.id + '">' + esc(names(x.w.people)) +
+      '</button><small>' + esc(D.fmtDate(x.session.date)) + '</small></div><b class="hw-pct num">' + x.w.pct + "%</b></div>" +
+      (x.session.caption ? '<p class="hw-cap">\u201c' + esc(x.session.caption) + "\u201d</p>" : "") +
+      '<div class="hw-runners">' + x.w.rows.filter(function (r) { return x.w.people.indexOf(r.p) < 0; }).slice(0, 2).map(function (r, i) {
+        return '<button class="runner" data-open="' + r.p.id + '"><span class="rk r' + (i + 2) + '">' + (i + 2) + '</span><span class="rn">' + esc(firstName(r.p)) +
+          '</span><span class="rp num">' + r.s.pct + "%</span></button>";
+      }).join("") + "</div>" +
+      '<div class="hw-actions">' + photoButton(x, true) + '<button class="btn" data-go="' + x.session.id + '">Full results</button></div></div></article>';
+
+    if (list.length > 1) {
+      h += '<div class="side-sec" style="margin-top:22px">Previous sessions</div><div class="wgrid">';
+      list.slice(1).forEach(function (y) {
+        var u = D.photoUrl(y.session), p = y.w.people[0];
+        var runners = y.w.rows.filter(function (r) { return y.w.people.indexOf(r.p) < 0; }).slice(0, 2);
+        h += '<article class="wcard"><button class="wc-open" data-go="' + y.session.id + '" aria-label="Open ' + esc(D.fmtDate(y.session.date)) + ' results">' +
+          '<div class="wc-media">' + (u ? '<img src="' + esc(u) + '" alt="" loading="lazy">' : D.avatar(p, "xl")) + "</div>" +
+          '<div class="wc-body"><div class="wc-top"><span>' + esc(D.fmtDate(y.session.date)) + '</span><b class="num">' + y.w.pct + "%</b></div>" +
+          '<div class="wc-name">' + esc(names(y.w.people)) + "</div>" +
+          (runners.length ? '<div class="wc-run">' + runners.map(function (r, i) { return (i + 2) + (i ? "rd " : "nd ") + esc(firstName(r.p)); }).join("\u2002") + "</div>" : "") +
+          "</div></button>" + photoButton(y, false) + "</article>";
+      });
+      h += "</div>";
+    }
+    return h + "</section>";
+  }
+  function hallHTML() {
+    var counts = {};
+    wonSessions().forEach(function (x) { x.w.people.forEach(function (p) { counts[p.id] = (counts[p.id] || 0) + 1; }); });
+    var ranked = Object.keys(counts).map(function (id) { return { p: m.byId[id], n: counts[id] }; })
+      .filter(function (x) { return x.p; })
+      .sort(function (a, b) { return (b.n - a.n) || a.p.name.localeCompare(b.p.name); }).slice(0, 8);
+    var h = '<div class="side-inner"><div class="side-head">' + ICON.trophy + "<div><small>Most wins</small><h2>Hall of fame</h2></div></div>";
+    if (!ranked.length) return h + '<p class="side-note">Session winners are counted here.</p></div>';
+    h += '<p class="side-note">Every session won, including joint wins.</p><ul class="pills">' + ranked.map(function (x, i) {
+      return '<li><button class="prow hlrow' + (i === 0 ? " fill" : "") + '" data-open="' + x.p.id + '">' + D.avatar(x.p, "sm") +
+        '<span class="hl-who"><b>' + esc(x.p.name) + "</b></span>" +
+        '<span class="hl-v num">' + x.n + (x.n === 1 ? " win" : " wins") + "</span></button></li>";
+    }).join("") + "</ul></div>";
+    return h;
+  }
+
+  var pendingPhoto = null;
+  function startPhoto(sid, pid) {
+    if (!selfToken(pid)) {
+      // Unlock first; a file picker has to open from a tap, so they tap the button again afterwards.
+      openSheet(pid);
+      logState.pid = pid; logState.pinOpen = true;
+      logState.pinErr = "";
+      logState.pinNote = "Enter your PIN, then close this and tap \u201cAdd your photo\u201d again.";
+      renderSheet(false);
+      var pi = document.getElementById("pinIn"); if (pi) pi.focus();
+      return;
+    }
+    pendingPhoto = { sid: sid, pid: pid };
+    var input = document.getElementById("photoPick");
+    input.value = "";
+    input.click();
+  }
+  function uploadPhoto(file) {
+    var job = pendingPhoto; pendingPhoto = null;
+    if (!job || !file) return;
+    var session = sessionById(job.sid);
+    var caption = window.prompt("Add a caption (optional)", (session && session.caption) || "");
+    if (caption === null) return;
+    toast("Uploading photo\u2026");
+    D.compressImage(file).then(function (img) {
+      return D.api("/api/self/photo", { method: "PUT", token: selfToken(job.pid), body: { sessionId: job.sid, type: img.type, data: img.data, caption: caption } });
+    }).then(function () { toast("Photo added"); return load(); }, function (err) {
+      if (err.status === 401) setSelfToken(job.pid, null);
+      toast(err.message || "Couldn\u2019t upload the photo.");
+    });
+  }
+  var toastTimer;
+  function toast(msg) {
+    var t = document.getElementById("toast");
+    if (!t) { t = document.createElement("div"); t.id = "toast"; t.className = "toast"; t.setAttribute("role", "status"); document.body.appendChild(t); }
+    t.textContent = msg; t.hidden = false;
+    clearTimeout(toastTimer); toastTimer = setTimeout(function () { t.hidden = true; }, 3500);
+  }
+
   // ---------- self-logging ----------
   var logState = { pid: null, pinOpen: false, pinErr: "", saving: 0, dirty: false, status: "", timer: null };
   function selfToken(pid) { try { return localStorage.getItem(SELF_KEY + pid); } catch (e) { return null; } }
@@ -263,7 +392,7 @@
           '<div class="pinrow"><input class="field" id="pinIn" type="password" inputmode="numeric" pattern="[0-9]*" maxlength="4" autocomplete="off" placeholder="\u2022\u2022\u2022\u2022">' +
           '<button class="btn primary" type="submit">Unlock</button></div>' +
           '<p class="pinerr" role="alert">' + esc(logState.pinErr) + "</p>" +
-          "<small>Your manager has your 4-digit PIN. This device remembers it.</small></form>";
+          "<small>" + esc(logState.pinNote || "Your manager has your 4-digit PIN. This device remembers it.") + "</small></form>";
       }
       return '<button class="btn primary logbtn" data-act="log-start" data-id="' + p.id + '">Log my numbers</button>';
     }
@@ -332,7 +461,7 @@
   var lastFocus = null;
   function openSheet(id) {
     lastFocus = document.activeElement;
-    if (logState.pid !== id) logState = { pid: id, pinOpen: false, pinErr: "", saving: 0, dirty: false, status: "", timer: null };
+    if (logState.pid !== id) logState = { pid: id, pinOpen: false, pinErr: "", pinNote: "", saving: 0, dirty: false, status: "", timer: null };
     openId = id;
     renderSheet(true);
   }
@@ -343,13 +472,14 @@
     openId = null;
     setTimeout(function () { if (!openId) root.innerHTML = ""; }, 320);
     document.body.style.overflow = "";
+    if (m && sel === "winners") render(); // photo buttons depend on who's unlocked on this device
     if (lastFocus && lastFocus.focus) lastFocus.focus();
   }
 
   function renderSheet(fresh) {
     var p = m.byId[openId];
     if (!p) { closeSheet(); return; }
-    var s = D.scoreOrGoals(m, p, sel);
+    var s = D.scoreOrGoals(m, p, sel === "winners" ? "all" : sel);
     var hist = D.history(m, p.id, null);
     var hit = s && s.pct != null && s.pct >= 100;
 
@@ -452,7 +582,9 @@
     var la = e.target.closest("[data-act]");
     if (la) {
       var act = la.getAttribute("data-act"), pid = la.getAttribute("data-id");
-      if (act === "log-start") {
+      if (act === "add-photo") {
+        startPhoto(la.getAttribute("data-sid"), pid);
+      } else if (act === "log-start") {
         logState.pid = pid; logState.pinOpen = true; logState.pinErr = "";
         renderSheet(false);
         var pi = document.getElementById("pinIn"); if (pi) pi.focus();
@@ -463,16 +595,21 @@
       }
       return;
     }
+    var go = e.target.closest("[data-go]");
+    if (go) { setSel(go.getAttribute("data-go")); window.scrollTo(0, 0); return; }
     var t = e.target.closest("[data-mode],[data-open],[data-close]");
     if (!t) return;
     if (t.hasAttribute("data-mode")) {
       var mode = t.getAttribute("data-mode");
-      if (mode === "all") setSel("all");
-      else if (sel === "all") setSel(m.desc[0].id);
+      if (mode === "all" || mode === "winners") setSel(mode);
+      else if (sel === "all" || sel === "winners") setSel(m.desc[0].id);
     } else if (t.hasAttribute("data-open")) openSheet(t.getAttribute("data-open"));
     else closeSheet();
   });
-  document.addEventListener("change", function (e) { if (e.target.id === "pick") setSel(e.target.value); });
+  document.addEventListener("change", function (e) {
+    if (e.target.id === "pick") setSel(e.target.value);
+    if (e.target.id === "photoPick") uploadPhoto(e.target.files && e.target.files[0]);
+  });
   document.addEventListener("input", function (e) { if (e.target.hasAttribute("data-lv")) queueSave(openId); });
   document.addEventListener("submit", function (e) {
     if (e.target.id !== "pinForm") return;

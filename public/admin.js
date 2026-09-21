@@ -187,6 +187,7 @@
     h += '<div class="bar"><label>Date <input class="field" type="date" id="sessionDate" value="' + esc(s.date) + '"></label>' +
       '<button class="btn quiet" data-act="refresh-goals" title="Apply everyone\u2019s current goals to this session">Use current goals</button>' +
       '<button class="btn quiet danger" data-act="del-session">Delete session</button></div>';
+    h += photoBox(s);
 
     var people = m.people.filter(function (p) { return (p.active && p.metrics.length) || D.entry(m, cur, p.id); });
     if (!people.length) {
@@ -208,6 +209,17 @@
       h += "</div>";
     });
     return h + "</div></section>";
+  }
+
+  function photoBox(s) {
+    var w = D.winners(m, s.id), url = D.photoUrl(s);
+    return '<div class="photobox"><div class="pb-media">' + (url ? '<img src="' + esc(url) + '" alt="Session photo">' : '<span>No photo yet</span>') + "</div>" +
+      '<div class="pb-body"><div class="pb-win">' + (w ? "Winner: <b>" + esc(w.people.map(function (p) { return p.name; }).join(" & ")) + "</b> " + w.pct + "%" : "No winner yet") + "</div>" +
+      '<input class="field" type="text" maxlength="140" id="capIn" placeholder="Caption for the Winners page (optional)" aria-label="Photo caption" value="' + esc(s.caption || "") + '">' +
+      '<div class="bar" style="margin:0"><button class="btn" data-act="admin-photo">' + (url ? "Replace photo" : "Add photo") + "</button>" +
+      (url ? '<button class="btn quiet danger" data-act="del-photo">Remove photo</button>' : "") + "</div>" +
+      '<p class="hint" style="margin:0">The session\u2019s winner can also add this from the Winners page with their PIN.</p></div>' +
+      '<input type="file" id="adminPhoto" accept="image/*" hidden></div>';
   }
 
   function metricsPanel() {
@@ -383,6 +395,13 @@
       debounce("team|" + tid, function () {
         track(call("/api/admin/teams/" + tid, "PATCH", { name: tname })).catch(function () {});
       }, 700);
+    } else if (t.id === "capIn") {
+      var cap = t.value, csid = cur;
+      debounce("cap|" + csid, function () {
+        track(call("/api/admin/sessions/" + csid, "PATCH", { caption: cap })).then(function () {
+          var ss = data.sessions.filter(function (x) { return x.id === csid; })[0]; if (ss) ss.caption = cap.trim() || null;
+        }).catch(function () {});
+      }, 700);
     } else if (t.id === "title") {
       var title = t.value;
       debounce("title", function () {
@@ -397,6 +416,12 @@
   root.addEventListener("change", function (e) {
     var t = e.target;
     if (t.id === "sessionSel") { flush(); cur = t.value; render(); }
+    else if (t.id === "adminPhoto" && t.files && t.files[0]) {
+      var psid = cur;
+      D.compressImage(t.files[0]).then(function (img) {
+        return track(call("/api/admin/sessions/" + psid + "/photo", "PUT", { type: img.type, data: img.data }));
+      }).then(reload).catch(function (err) { alert(err.message); });
+    }
     else if (t.id === "sessionDate" && t.value) {
       track(call("/api/admin/sessions/" + cur, "PATCH", { date: t.value })).then(reload).catch(function () {});
     } else if (t.id === "teamName") {
@@ -453,6 +478,11 @@
     var act = b.getAttribute("data-act"), id = b.getAttribute("data-id"), p = id && m && m.byId[id];
     var mid = b.getAttribute("data-metric");
     if (act === "retry") start();
+    else if (act === "admin-photo") { var fi = document.getElementById("adminPhoto"); fi.value = ""; fi.click(); }
+    else if (act === "del-photo") {
+      if (!confirm("Remove this session\u2019s photo?")) return;
+      track(call("/api/admin/sessions/" + cur + "/photo", "DELETE")).then(reload).catch(function () {});
+    }
     else if (act === "team") {
       var slug = b.getAttribute("data-slug");
       if (slug === teamSlug) return;

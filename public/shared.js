@@ -146,6 +146,35 @@ window.DH = (function () {
     });
   }
 
+  // Winners of a session: highest score above 0 (ties share). Returns { pct, people, rows }.
+  function winners(m, sid) {
+    var logged = rank(m, sid).logged.filter(function (r) { return r.s.pct > 0; });
+    if (!logged.length) return null;
+    var top = logged[0].s.pct;
+    return { pct: top, people: logged.filter(function (r) { return r.s.pct === top; }).map(function (r) { return r.p; }), rows: logged };
+  }
+  function photoUrl(session) {
+    return session.photo ? "/api/router?path=photo&session=" + encodeURIComponent(session.id) + "&v=" + encodeURIComponent(session.photo) : null;
+  }
+  // Shrink a photo in the browser (longest side 1280px, JPEG) before uploading.
+  function compressImage(file) {
+    return new Promise(function (resolve, reject) {
+      var url = URL.createObjectURL(file), img = new Image();
+      img.onload = function () {
+        var max = 1280, w = img.naturalWidth, h = img.naturalHeight, k = Math.min(1, max / Math.max(w, h));
+        var c = document.createElement("canvas");
+        c.width = Math.round(w * k); c.height = Math.round(h * k);
+        c.getContext("2d").drawImage(img, 0, 0, c.width, c.height);
+        URL.revokeObjectURL(url);
+        var q = 0.82, out = c.toDataURL("image/jpeg", q);
+        while (out.length > 900000 && q > 0.4) { q -= 0.12; out = c.toDataURL("image/jpeg", q); }
+        resolve({ type: "image/jpeg", data: out.split(",")[1] });
+      };
+      img.onerror = function () { URL.revokeObjectURL(url); reject(new Error("That file couldn\u2019t be read as a photo.")); };
+      img.src = url;
+    });
+  }
+
   // Team %: every activity logged added up, divided by every goal added up (uncapped).
   function pooledPct(totals) {
     var v = 0, g = 0;
@@ -178,6 +207,7 @@ window.DH = (function () {
   return {
     esc: esc, avatar: avatar, fmtDate: fmtDate, todayISO: todayISO, model: model, entry: entry,
     metricColor: metricColor, metricName: metricName, pctOf: pctOf, score: score, scoreOrGoals: scoreOrGoals, rank: rank,
-    history: history, streak: streak, teamTotals: teamTotals, pooledPct: pooledPct, api: api
+    history: history, streak: streak, teamTotals: teamTotals, pooledPct: pooledPct, winners: winners,
+    photoUrl: photoUrl, compressImage: compressImage, api: api
   };
 })();

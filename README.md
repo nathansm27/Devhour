@@ -55,6 +55,11 @@ The database tables are created automatically on the first request.
   - Boards refresh every 5 seconds.
   - Five wrong PINs lock that person out for 15 minutes.
   - "New PIN" signs them out on every device.
+- **Winners:**
+  - The Winners tab on each board shows every past session's winner (the top score; ties are shared), with the runners-up and a Hall of fame.
+  - Each session can have one photo and a caption.
+  - You add them in admin (Log results), or the session's winner adds them from the Winners tab using their PIN.
+  - Photos are shrunk in the browser (about 150 KB) and stored in the database.
 - **Scoring:** each score averages that person's metrics against their goals, each capped at 200%, so people tracking different things can share one leaderboard.
 - **Team %:** every activity logged added up, divided by every goal added up (not capped).
 - **Goals and history:** goals are copied onto each number when it's first logged, so changing a goal later doesn't rewrite past sessions. "Use current goals" re-applies everyone's current goals to one session.

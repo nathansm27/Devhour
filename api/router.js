@@ -9,6 +9,7 @@ const TOKEN_DAYS = 30;
 const SELF_TOKEN_DAYS = 90;
 const PIN_TRIES = 5;          // wrong PINs before a person is locked out
 const PIN_LOCK_MINUTES = 15;
+const PHOTO_MAX_BYTES = 800 * 1024; // photos are shrunk in the browser to ~150 KB first
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 const SCHEMA = `
@@ -66,6 +67,14 @@ ALTER TABLE dh_sessions ADD COLUMN IF NOT EXISTS team_id UUID REFERENCES dh_team
 ALTER TABLE dh_metrics ADD COLUMN IF NOT EXISTS team_id UUID REFERENCES dh_teams(id) ON DELETE CASCADE;
 ALTER TABLE dh_metrics ADD COLUMN IF NOT EXISTS default_goal INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE dh_teams ADD COLUMN IF NOT EXISTS display TEXT;
+ALTER TABLE dh_sessions ADD COLUMN IF NOT EXISTS caption TEXT;
+CREATE TABLE IF NOT EXISTS dh_photos (
+  session_id UUID PRIMARY KEY REFERENCES dh_sessions(id) ON DELETE CASCADE,
+  mime TEXT NOT NULL,
+  data BYTEA NOT NULL,
+  uploaded_by UUID,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
 ALTER TABLE dh_people ADD COLUMN IF NOT EXISTS pin TEXT;
 ALTER TABLE dh_people ADD COLUMN IF NOT EXISTS pin_fails INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE dh_people ADD COLUMN IF NOT EXISTS pin_locked_until TIMESTAMPTZ;`;
@@ -211,6 +220,41 @@ async function settlePerson(tx, sessionId, personId, allBlank) {
            WHERE person_id = ${personId} AND goal > 0
            ON CONFLICT (session_id, person_id, metric_id) DO NOTHING`;
 }
+// Session winners: highest personal score (each metric logged/goal, capped at 200%, averaged). Ties share.
+async function sessionWinners(sql, sessionId) {
+  const rows = await sql`SELECT person_id, value, goal FROM dh_entries WHERE session_id = ${sessionId} AND goal > 0`;
+  const by = {};
+  for (const r of rows) (by[r.person_id] ||= []).push(Math.min(r.value / r.goal, 2));
+  let best = 0, winners = [];
+  for (const [pid, ratios] of Object.entries(by)) {
+    const pct = Math.round((100 * ratios.reduce((a, b) => a + b, 0)) / ratios.length);
+    if (pct > best) { best = pct; winners = [pid]; } else if (pct === best && pct > 0) winners.push(pid);
+  }
+  return best > 0 ? winners : [];
+}
+function readPhoto(body) {
+  const mime = String(body.type || "");
+  if (!["image/jpeg", "image/png", "image/webp"].includes(mime)) throw new HttpError(400, "Photos must be JPEG, PNG or WebP.");
+  const buf = Buffer.from(String(body.data || ""), "base64");
+  if (!buf.length) throw new HttpError(400, "No photo received.");
+  if (buf.length > PHOTO_MAX_BYTES) throw new HttpError(400, "That photo is too large. Try a smaller one.");
+  const magic = buf.subarray(0, 12);
+  const ok = (mime === "image/jpeg" && magic[0] === 0xff && magic[1] === 0xd8)
+    || (mime === "image/png" && magic[0] === 0x89 && magic[1] === 0x50)
+    || (mime === "image/webp" && magic.subarray(0, 4).toString() === "RIFF" && magic.subarray(8, 12).toString() === "WEBP");
+  if (!ok) throw new HttpError(400, "That file isn't a photo.");
+  return { mime, buf };
+}
+function cleanCaption(v) {
+  return String(v ?? "").trim().replace(/\s+/g, " ").slice(0, 140) || null;
+}
+async function savePhoto(sql, sessionId, body, uploadedBy) {
+  const { mime, buf } = readPhoto(body);
+  await sql`INSERT INTO dh_photos (session_id, mime, data, uploaded_by) VALUES (${sessionId}, ${mime}, ${buf}, ${uploadedBy})
+            ON CONFLICT (session_id) DO UPDATE SET mime = EXCLUDED.mime, data = EXCLUDED.data,
+            uploaded_by = EXCLUDED.uploaded_by, updated_at = now()`;
+  if (body.caption !== undefined) await sql`UPDATE dh_sessions SET caption = ${cleanCaption(body.caption)} WHERE id = ${sessionId}`;
+}
 function slugify(name) {
   return name.toLowerCase().normalize("NFKD").replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 40) || "team";
 }
@@ -318,6 +362,21 @@ async function self(request, sql, secret, parts) {
     return json({ token: await makeToken(selfKey(secret, p), { pid }, SELF_TOKEN_DAYS), personId: pid });
   }
 
+  // PUT /self/photo { sessionId, type, data (base64), caption? } -> only a winner of that session
+  if (parts[0] === "photo" && method === "PUT") {
+    const person = await checkSelf(sql, secret, request);
+    if (!person) throw new HttpError(401, "Enter your PIN again.");
+    const body = await readJSON(request);
+    const sessionId = cleanId(body.sessionId, "Session");
+    const session = await mustExist(sql, "dh_sessions", sessionId, "Session");
+    sameTeam(session, person);
+    if (!(await sessionWinners(sql, sessionId)).includes(person.id)) {
+      throw new HttpError(403, "Only the session's winner can add its photo.");
+    }
+    await savePhoto(sql, sessionId, body, person.id);
+    return json({ ok: true });
+  }
+
   // PUT /self/entries { values: { metricId: number | null } } -> today's session for the person's team
   if (parts[0] === "entries" && method === "PUT") {
     const person = await checkSelf(sql, secret, request);
@@ -372,7 +431,10 @@ async function getData(sql, teamParam) {
     sql`SELECT id, name, active FROM dh_people WHERE team_id = ${team.id} ORDER BY seq`,
     sql`SELECT pm.person_id, pm.metric_id, pm.goal FROM dh_person_metrics pm
         JOIN dh_people p ON p.id = pm.person_id WHERE p.team_id = ${team.id} ORDER BY pm.seq`,
-    sql`SELECT id, to_char(date, 'YYYY-MM-DD') AS date FROM dh_sessions WHERE team_id = ${team.id} ORDER BY date DESC, seq DESC`,
+    sql`SELECT s.id, to_char(s.date, 'YYYY-MM-DD') AS date, s.caption,
+               (extract(epoch FROM p.updated_at) * 1000)::bigint AS photo_v
+        FROM dh_sessions s LEFT JOIN dh_photos p ON p.session_id = s.id
+        WHERE s.team_id = ${team.id} ORDER BY s.date DESC, s.seq DESC`,
     sql`SELECT e.session_id, e.person_id, e.metric_id, e.value, e.goal FROM dh_entries e
         JOIN dh_sessions s ON s.id = e.session_id WHERE s.team_id = ${team.id}`,
   ]);
@@ -386,7 +448,7 @@ async function getData(sql, teamParam) {
     teams: teams.map((t) => ({ id: t.id, name: t.name, slug: t.slug })),
     metrics: metrics.map((x) => ({ id: x.id, name: x.name, defaultGoal: x.default_goal })),
     people: people.map((p) => ({ id: p.id, name: p.name, active: p.active, metrics: byPerson[p.id] || [] })),
-    sessions: sessions.map((x) => ({ id: x.id, date: x.date })),
+    sessions: sessions.map((x) => ({ id: x.id, date: x.date, caption: x.caption || null, photo: x.photo_v ? String(x.photo_v) : null })),
     entries: entries.map((e) => ({
       sessionId: e.session_id, personId: e.person_id, metricId: e.metric_id, value: e.value, goal: e.goal,
     })),
@@ -592,11 +654,20 @@ async function admin(request, sql, parts) {
       return json({ ok: true });
     }
 
+    if (sub === "photo" && method === "PUT") {
+      await savePhoto(sql, id, await readJSON(request), null);
+      return json({ ok: true });
+    }
+    if (sub === "photo" && method === "DELETE") {
+      await sql`DELETE FROM dh_photos WHERE session_id = ${id}`;
+      return json({ ok: true });
+    }
+
     if (!sub && method === "PATCH") {
       const body = await readJSON(request);
-      const date = cleanDate(body.date);
-      await sql`UPDATE dh_sessions SET date = ${date} WHERE id = ${id}`;
-      return json({ id, date });
+      if (body.date !== undefined) await sql`UPDATE dh_sessions SET date = ${cleanDate(body.date)} WHERE id = ${id}`;
+      if (body.caption !== undefined) await sql`UPDATE dh_sessions SET caption = ${cleanCaption(body.caption)} WHERE id = ${id}`;
+      return json({ ok: true });
     }
     if (!sub && method === "DELETE") {
       await sql`DELETE FROM dh_sessions WHERE id = ${id}`; // entries cascade
@@ -621,6 +692,16 @@ export async function handle(request) {
     await ensureSchema(sql);
 
     if (parts[0] === "data" && request.method === "GET") return json(await getData(sql, url.searchParams.get("team")));
+
+    // GET /photo?session=<id>&v=<version>: the version changes whenever the photo does, so it can be cached for good.
+    if (parts[0] === "photo" && request.method === "GET") {
+      const sid = cleanId(url.searchParams.get("session"), "Photo");
+      const [ph] = await sql`SELECT mime, data FROM dh_photos WHERE session_id = ${sid}`;
+      if (!ph) throw new HttpError(404, "Photo not found.");
+      return new Response(ph.data, {
+        headers: { "content-type": ph.mime, "cache-control": "public, max-age=31536000, immutable", "x-content-type-options": "nosniff" },
+      });
+    }
 
     if (parts[0] === "login" && request.method === "POST") {
       if (!secret) throw new HttpError(500, "ADMIN_PASSWORD isn't set in the Vercel project's environment variables.");
