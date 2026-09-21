@@ -59,7 +59,10 @@
     if (m && m.desc.some(function (s) { return s.id === h; })) return h;
     // With no sessions yet, show today (everyone's goals at zero).
     if (!m || !m.desc.length) return "today";
-    // Default to the latest session that isn't in the future.
+    // The admin can choose what the board opens on; otherwise the latest session that isn't in the future.
+    var pick = m.data.team && m.data.team.display;
+    if (pick === "all") return "all";
+    if (pick && m.desc.some(function (s) { return s.id === pick; })) return pick;
     var today = londonToday();
     var past = m.desc.filter(function (x) { return x.date <= today; })[0];
     return (past || m.desc[m.desc.length - 1]).id;

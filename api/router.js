@@ -65,6 +65,7 @@ ALTER TABLE dh_people ADD COLUMN IF NOT EXISTS team_id UUID REFERENCES dh_teams(
 ALTER TABLE dh_sessions ADD COLUMN IF NOT EXISTS team_id UUID REFERENCES dh_teams(id) ON DELETE CASCADE;
 ALTER TABLE dh_metrics ADD COLUMN IF NOT EXISTS team_id UUID REFERENCES dh_teams(id) ON DELETE CASCADE;
 ALTER TABLE dh_metrics ADD COLUMN IF NOT EXISTS default_goal INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE dh_teams ADD COLUMN IF NOT EXISTS display TEXT;
 ALTER TABLE dh_people ADD COLUMN IF NOT EXISTS pin TEXT;
 ALTER TABLE dh_people ADD COLUMN IF NOT EXISTS pin_fails INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE dh_people ADD COLUMN IF NOT EXISTS pin_locked_until TIMESTAMPTZ;`;
@@ -223,8 +224,8 @@ async function uniqueSlug(sql, name) {
 async function teamFrom(sql, value) {
   const v = String(value ?? "").trim().toLowerCase();
   const rows = v
-    ? await sql`SELECT id, name, slug FROM dh_teams WHERE slug = ${v} OR id::text = ${v}`
-    : await sql`SELECT id, name, slug FROM dh_teams ORDER BY seq LIMIT 1`;
+    ? await sql`SELECT id, name, slug, display FROM dh_teams WHERE slug = ${v} OR id::text = ${v}`
+    : await sql`SELECT id, name, slug, display FROM dh_teams ORDER BY seq LIMIT 1`;
   if (!rows.length) throw new HttpError(404, "Team not found.");
   return rows[0];
 }
@@ -380,7 +381,8 @@ async function getData(sql, teamParam) {
   for (const a of assigned) (byPerson[a.person_id] ||= []).push({ metricId: a.metric_id, goal: a.goal });
   return {
     title: s.title || "Development hour",
-    team: { id: team.id, name: team.name, slug: team.slug },
+    // display: which view the board opens on: null = latest session, "all" = all time, or a session id
+    team: { id: team.id, name: team.name, slug: team.slug, display: team.display || null },
     teams: teams.map((t) => ({ id: t.id, name: t.name, slug: t.slug })),
     metrics: metrics.map((x) => ({ id: x.id, name: x.name, defaultGoal: x.default_goal })),
     people: people.map((p) => ({ id: p.id, name: p.name, active: p.active, metrics: byPerson[p.id] || [] })),
@@ -423,13 +425,22 @@ async function admin(request, sql, parts) {
       return json(team, 201);
     }
     const id = cleanId(rawId, "Team");
-    await mustExist(sql, "dh_teams", id, "Team");
+    const team = await mustExist(sql, "dh_teams", id, "Team");
     if (method === "PATCH") {
       // The link (slug) stays the same when a team is renamed, so shared links keep working.
       const body = await readJSON(request);
-      const name = cleanName(body.name, 40);
-      await sql`UPDATE dh_teams SET name = ${name} WHERE id = ${id}`;
-      return json({ id, name });
+      const name = body.name !== undefined ? cleanName(body.name, 40) : team.name;
+      let display = team.display;
+      if (body.display !== undefined) {
+        const d = body.display === null || body.display === "" || body.display === "latest" ? null : String(body.display);
+        if (d && d !== "all") {
+          const [sess] = await sql`SELECT team_id FROM dh_sessions WHERE id = ${cleanId(d, "Session")}`;
+          if (!sess || sess.team_id !== id) throw new HttpError(404, "Session not found.");
+        }
+        display = d;
+      }
+      await sql`UPDATE dh_teams SET name = ${name}, display = ${display} WHERE id = ${id}`;
+      return json({ id, name, display });
     }
   }
 

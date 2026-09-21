@@ -289,8 +289,14 @@
   }
 
   function settingsPanel() {
-    return '<section class="panel"><h2>' + esc(data.team.name) + ' settings</h2><p class="hint">Each team has its own leaderboard link. Share this one with ' + esc(data.team.name) + '.</p>' +
+    return '<section class="panel"><h2>' + esc(data.team.name) + ' settings</h2><p class="hint">Each team has its own leaderboard link. People can still switch sessions on the board; this sets what it opens on.</p>' +
       '<div class="setrow"><label for="teamName">Team name</label><input class="field" type="text" maxlength="40" id="teamName" value="' + esc(data.team.name) + '"></div>' +
+      '<div class="setrow"><label for="teamDisplay">Board opens on</label><select class="field" id="teamDisplay">' +
+      '<option value="latest"' + (!data.team.display ? " selected" : "") + ">Latest session (automatic)</option>" +
+      '<option value="all"' + (data.team.display === "all" ? " selected" : "") + ">All time</option>" +
+      m.desc.map(function (x) {
+        return '<option value="' + x.id + '"' + (data.team.display === x.id ? " selected" : "") + ">" + esc(D.fmtDate(x.date, true)) + "</option>";
+      }).join("") + "</select></div>" +
       '<div class="setrow"><label for="teamLink">Leaderboard link</label><div class="linkrow"><input class="field" type="text" id="teamLink" readonly value="' + esc(boardLink(true)) + '">' +
       '<button class="btn" data-act="copy-link">Copy</button></div></div>' +
       '</section>' +
@@ -395,6 +401,9 @@
       track(call("/api/admin/sessions/" + cur, "PATCH", { date: t.value })).then(reload).catch(function () {});
     } else if (t.id === "teamName") {
       if (!t.value.trim()) t.value = data.team.name; else reload().catch(function () {});
+    } else if (t.id === "teamDisplay") {
+      var dv = t.value;
+      track(call("/api/admin/teams/" + data.team.id, "PATCH", { display: dv })).then(function (r) { data.team.display = r.display; }).catch(function () {});
     } else if (t.hasAttribute("data-name") || t.hasAttribute("data-mname")) {
       // Names changed: refresh labels elsewhere once saved.
       if (!t.value.trim()) {
