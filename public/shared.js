@@ -62,15 +62,15 @@ window.DH = (function () {
     return function (a, b) { return (m.metricOrder[a] || 0) - (m.metricOrder[b] || 0); };
   }
 
-  // Average of each metric against its goal, each capped at 200%.
+  // Everything logged added up, divided by every goal added up (uncapped).
   function pctOf(lines) {
-    var ratios = [];
-    lines.forEach(function (l) { if (l.goal > 0) ratios.push(Math.min(l.value / l.goal, 2)); });
-    if (!ratios.length) return null;
-    return Math.round(100 * ratios.reduce(function (a, b) { return a + b; }, 0) / ratios.length);
+    var v = 0, g = 0;
+    lines.forEach(function (l) { if (l.goal > 0) { v += l.value; g += l.goal; } });
+    return g > 0 ? Math.round(100 * v / g) : null;
   }
 
-  // Score for one person over one session, or every session ("all"), counting only metrics with a goal.
+  // Score for one person over one session, or every session ("all"): everything they logged
+  // added up against their goals added up, counting only metrics with a goal.
   // Returns { lines: [{metricId, value, goal}], pct, sessions } or null when nothing is logged.
   function score(m, pid, sid) {
     var ids = sid === "all" ? m.asc.map(function (s) { return s.id; }) : [sid];
@@ -175,12 +175,8 @@ window.DH = (function () {
     });
   }
 
-  // Team %: every activity logged added up, divided by every goal added up (uncapped).
-  function pooledPct(totals) {
-    var v = 0, g = 0;
-    totals.forEach(function (t) { if (t.goal > 0) { v += t.value; g += t.goal; } });
-    return g > 0 ? Math.round(100 * v / g) : null;
-  }
+  // The team works the same way: everything logged against every goal.
+  var pooledPct = pctOf;
 
   // API: every route is served by one function at /api/router.
   function api(path, opts) {

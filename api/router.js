@@ -220,14 +220,17 @@ async function settlePerson(tx, sessionId, personId, allBlank) {
            WHERE person_id = ${personId} AND goal > 0
            ON CONFLICT (session_id, person_id, metric_id) DO NOTHING`;
 }
-// Session winners: highest personal score (each metric logged/goal, capped at 200%, averaged). Ties share.
+// Session winners: highest personal score (everything logged against every goal). Ties share.
 async function sessionWinners(sql, sessionId) {
   const rows = await sql`SELECT person_id, value, goal FROM dh_entries WHERE session_id = ${sessionId} AND goal > 0`;
   const by = {};
-  for (const r of rows) (by[r.person_id] ||= []).push(Math.min(r.value / r.goal, 2));
+  for (const r of rows) {
+    const t = (by[r.person_id] ||= { v: 0, g: 0 });
+    t.v += r.value; t.g += r.goal;
+  }
   let best = 0, winners = [];
-  for (const [pid, ratios] of Object.entries(by)) {
-    const pct = Math.round((100 * ratios.reduce((a, b) => a + b, 0)) / ratios.length);
+  for (const [pid, t] of Object.entries(by)) {
+    const pct = Math.round((100 * t.v) / t.g);
     if (pct > best) { best = pct; winners = [pid]; } else if (pct === best && pct > 0) winners.push(pid);
   }
   return best > 0 ? winners : [];

@@ -60,8 +60,8 @@ The database tables are created automatically on the first request.
   - Each session can have one photo and a caption.
   - You add them in admin (Log results), or the session's winner adds them from the Winners tab using their PIN.
   - Photos are shrunk in the browser (about 150 KB) and stored in the database.
-- **Scoring:** each score averages that person's metrics against their goals, each capped at 200%, so people tracking different things can share one leaderboard.
-- **Team %:** every activity logged added up, divided by every goal added up (not capped).
+- **Scoring:** a person's score is everything they logged added up, divided by their goals added up, so people tracking different things can share one leaderboard.
+- **Team %:** the same, across everyone.
 - **Goals and history:** goals are copied onto each number when it's first logged, so changing a goal later doesn't rewrite past sessions. "Use current goals" re-applies everyone's current goals to one session.
 - **Removing things:**
   - Removing a metric from one person keeps their past numbers.

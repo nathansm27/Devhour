@@ -124,7 +124,7 @@
     var top = r.logged.filter(function (x) { return x.s.pct > 0; }).slice(0, 3);
     h += top.length ? podiumHTML(top) : '<div style="height:24px"></div>';
     h += boardHTML(r);
-    h += '<p class="foot">Each score averages that person\u2019s metrics against their own goals. The line under each row fills at 100%. Tap your name to log your numbers.</p>';
+    h += '<p class="foot">Each score is everything a person logged added up against their own goals added up. The line under each row fills at 100%. Tap your name to log your numbers.</p>';
     var main = $("main");
     main.className = intro ? "intro" : "";
     main.innerHTML = h;
