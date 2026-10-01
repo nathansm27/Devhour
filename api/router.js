@@ -66,6 +66,8 @@ ALTER TABLE dh_people ADD COLUMN IF NOT EXISTS team_id UUID REFERENCES dh_teams(
 ALTER TABLE dh_sessions ADD COLUMN IF NOT EXISTS team_id UUID REFERENCES dh_teams(id) ON DELETE CASCADE;
 ALTER TABLE dh_metrics ADD COLUMN IF NOT EXISTS team_id UUID REFERENCES dh_teams(id) ON DELETE CASCADE;
 ALTER TABLE dh_metrics ADD COLUMN IF NOT EXISTS default_goal INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE dh_metrics ADD COLUMN IF NOT EXISTS weight INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE dh_entries ADD COLUMN IF NOT EXISTS weight INTEGER NOT NULL DEFAULT 1;
 ALTER TABLE dh_teams ADD COLUMN IF NOT EXISTS display TEXT;
 ALTER TABLE dh_sessions ADD COLUMN IF NOT EXISTS caption TEXT;
 CREATE TABLE IF NOT EXISTS dh_photos (
@@ -191,6 +193,11 @@ function cleanCount(v, nullable = false) {
   if (!Number.isFinite(n) || n < 0 || n > 1000000) throw new HttpError(400, "Numbers must be between 0 and 1,000,000.");
   return Math.floor(n);
 }
+function cleanWeight(v) {
+  const n = Number(v);
+  if (!Number.isFinite(n) || n < 1 || n > 100) throw new HttpError(400, "Weight must be between 1 and 100.");
+  return Math.floor(n);
+}
 function cleanDate(v) {
   const s = String(v ?? "");
   if (!/^\d{4}-\d{2}-\d{2}$/.test(s) || isNaN(Date.parse(s + "T00:00:00Z"))) throw new HttpError(400, "Date must be YYYY-MM-DD.");
@@ -215,18 +222,19 @@ async function settlePerson(tx, sessionId, personId, allBlank) {
     await tx`DELETE FROM dh_entries WHERE session_id = ${sessionId} AND person_id = ${personId}`;
     return;
   }
-  await tx`INSERT INTO dh_entries (session_id, person_id, metric_id, value, goal)
-           SELECT ${sessionId}, ${personId}, metric_id, 0, goal FROM dh_person_metrics
-           WHERE person_id = ${personId} AND goal > 0
+  await tx`INSERT INTO dh_entries (session_id, person_id, metric_id, value, goal, weight)
+           SELECT ${sessionId}, ${personId}, pm.metric_id, 0, pm.goal, m.weight
+           FROM dh_person_metrics pm JOIN dh_metrics m ON m.id = pm.metric_id
+           WHERE pm.person_id = ${personId} AND pm.goal > 0
            ON CONFLICT (session_id, person_id, metric_id) DO NOTHING`;
 }
-// Session winners: highest personal score (everything logged against every goal). Ties share.
+// Session winners: highest personal score (everything logged against every goal, times each metric's weight). Ties share.
 async function sessionWinners(sql, sessionId) {
-  const rows = await sql`SELECT person_id, value, goal FROM dh_entries WHERE session_id = ${sessionId} AND goal > 0`;
+  const rows = await sql`SELECT person_id, value, goal, weight FROM dh_entries WHERE session_id = ${sessionId} AND goal > 0`;
   const by = {};
   for (const r of rows) {
     const t = (by[r.person_id] ||= { v: 0, g: 0 });
-    t.v += r.value; t.g += r.goal;
+    t.v += r.value * r.weight; t.g += r.goal * r.weight;
   }
   let best = 0, winners = [];
   for (const [pid, t] of Object.entries(by)) {
@@ -408,9 +416,10 @@ async function self(request, sql, secret, parts) {
           await tx`DELETE FROM dh_entries WHERE session_id = ${session.id} AND person_id = ${person.id} AND metric_id = ${metricId}`;
           continue;
         }
-        await tx`INSERT INTO dh_entries (session_id, person_id, metric_id, value, goal)
-                 SELECT ${session.id}, ${person.id}, ${metricId}, ${v}, goal FROM dh_person_metrics
-                 WHERE person_id = ${person.id} AND metric_id = ${metricId}
+        await tx`INSERT INTO dh_entries (session_id, person_id, metric_id, value, goal, weight)
+                 SELECT ${session.id}, ${person.id}, ${metricId}, ${v}, pm.goal, m.weight
+                 FROM dh_person_metrics pm JOIN dh_metrics m ON m.id = pm.metric_id
+                 WHERE pm.person_id = ${person.id} AND pm.metric_id = ${metricId}
                  ON CONFLICT (session_id, person_id, metric_id)
                  DO UPDATE SET value = EXCLUDED.value, updated_at = now()`;
       }
@@ -430,7 +439,7 @@ async function getData(sql, teamParam) {
   const [settings, teams, metrics, people, assigned, sessions, entries] = await Promise.all([
     sql`SELECT key, value FROM dh_settings`,
     sql`SELECT id, name, slug FROM dh_teams ORDER BY seq`,
-    sql`SELECT id, name, default_goal FROM dh_metrics WHERE team_id = ${team.id} ORDER BY seq`,
+    sql`SELECT id, name, default_goal, weight FROM dh_metrics WHERE team_id = ${team.id} ORDER BY seq`,
     sql`SELECT id, name, active FROM dh_people WHERE team_id = ${team.id} ORDER BY seq`,
     sql`SELECT pm.person_id, pm.metric_id, pm.goal FROM dh_person_metrics pm
         JOIN dh_people p ON p.id = pm.person_id WHERE p.team_id = ${team.id} ORDER BY pm.seq`,
@@ -438,7 +447,7 @@ async function getData(sql, teamParam) {
                (extract(epoch FROM p.updated_at) * 1000)::bigint AS photo_v
         FROM dh_sessions s LEFT JOIN dh_photos p ON p.session_id = s.id
         WHERE s.team_id = ${team.id} ORDER BY s.date DESC, s.seq DESC`,
-    sql`SELECT e.session_id, e.person_id, e.metric_id, e.value, e.goal FROM dh_entries e
+    sql`SELECT e.session_id, e.person_id, e.metric_id, e.value, e.goal, e.weight FROM dh_entries e
         JOIN dh_sessions s ON s.id = e.session_id WHERE s.team_id = ${team.id}`,
   ]);
   const s = Object.fromEntries(settings.map((r) => [r.key, r.value]));
@@ -449,11 +458,11 @@ async function getData(sql, teamParam) {
     // display: which view the board opens on: null = latest session, "all" = all time, or a session id
     team: { id: team.id, name: team.name, slug: team.slug, display: team.display || null },
     teams: teams.map((t) => ({ id: t.id, name: t.name, slug: t.slug })),
-    metrics: metrics.map((x) => ({ id: x.id, name: x.name, defaultGoal: x.default_goal })),
+    metrics: metrics.map((x) => ({ id: x.id, name: x.name, defaultGoal: x.default_goal, weight: x.weight })),
     people: people.map((p) => ({ id: p.id, name: p.name, active: p.active, metrics: byPerson[p.id] || [] })),
     sessions: sessions.map((x) => ({ id: x.id, date: x.date, caption: x.caption || null, photo: x.photo_v ? String(x.photo_v) : null })),
     entries: entries.map((e) => ({
-      sessionId: e.session_id, personId: e.person_id, metricId: e.metric_id, value: e.value, goal: e.goal,
+      sessionId: e.session_id, personId: e.person_id, metricId: e.metric_id, value: e.value, goal: e.goal, weight: e.weight,
     })),
     updatedAt: new Date().toISOString(),
   };
@@ -514,10 +523,10 @@ async function admin(request, sql, parts) {
     if (method === "POST" && !rawId) {
       const body = await readJSON(request);
       const team = await teamFrom(sql, body.teamId);
-      const metric = { id: crypto.randomUUID(), name: cleanName(body.name, 40) };
+      const metric = { id: crypto.randomUUID(), name: cleanName(body.name, 40), weight: body.weight === undefined ? 1 : cleanWeight(body.weight) };
       const goal = cleanCount(body.goal);
       await sql.begin(async (tx) => {
-        await tx`INSERT INTO dh_metrics (id, name, team_id, default_goal) VALUES (${metric.id}, ${metric.name}, ${team.id}, ${goal})`;
+        await tx`INSERT INTO dh_metrics (id, name, team_id, default_goal, weight) VALUES (${metric.id}, ${metric.name}, ${team.id}, ${goal}, ${metric.weight})`;
         if (body.assignAll) {
           await tx`INSERT INTO dh_person_metrics (person_id, metric_id, goal)
                    SELECT id, ${metric.id}, ${goal} FROM dh_people WHERE active AND team_id = ${team.id} ORDER BY seq`;
@@ -531,8 +540,9 @@ async function admin(request, sql, parts) {
       const body = await readJSON(request);
       const name = body.name !== undefined ? cleanName(body.name, 40) : metric.name;
       const defaultGoal = body.defaultGoal !== undefined ? cleanCount(body.defaultGoal) : metric.default_goal;
-      await sql`UPDATE dh_metrics SET name = ${name}, default_goal = ${defaultGoal} WHERE id = ${id}`;
-      return json({ id, name, defaultGoal });
+      const weight = body.weight !== undefined ? cleanWeight(body.weight) : metric.weight;
+      await sql`UPDATE dh_metrics SET name = ${name}, default_goal = ${defaultGoal}, weight = ${weight} WHERE id = ${id}`;
+      return json({ id, name, defaultGoal, weight });
     }
     if (method === "DELETE") {
       await sql`DELETE FROM dh_metrics WHERE id = ${id}`; // assignments and logged numbers cascade
@@ -635,9 +645,10 @@ async function admin(request, sql, parts) {
             continue;
           }
           // The goal is copied when a number is first logged, so later goal changes don't rewrite history.
-          await tx`INSERT INTO dh_entries (session_id, person_id, metric_id, value, goal)
+          await tx`INSERT INTO dh_entries (session_id, person_id, metric_id, value, goal, weight)
                    SELECT ${id}, ${personId}, m.id, ${v},
-                          COALESCE((SELECT goal FROM dh_person_metrics WHERE person_id = ${personId} AND metric_id = m.id), 0)
+                          COALESCE((SELECT goal FROM dh_person_metrics WHERE person_id = ${personId} AND metric_id = m.id), 0),
+                          m.weight
                    FROM dh_metrics m WHERE m.id = ${metricId}
                    ON CONFLICT (session_id, person_id, metric_id)
                    DO UPDATE SET value = EXCLUDED.value, updated_at = now()`;
@@ -651,8 +662,8 @@ async function admin(request, sql, parts) {
     }
 
     if (sub === "refresh-goals" && method === "POST") {
-      await sql`UPDATE dh_entries e SET goal = pm.goal
-                FROM dh_person_metrics pm
+      await sql`UPDATE dh_entries e SET goal = pm.goal, weight = m.weight
+                FROM dh_person_metrics pm JOIN dh_metrics m ON m.id = pm.metric_id
                 WHERE pm.person_id = e.person_id AND pm.metric_id = e.metric_id AND e.session_id = ${id}`;
       return json({ ok: true });
     }

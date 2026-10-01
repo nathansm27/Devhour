@@ -51,7 +51,7 @@ window.DH = (function () {
     data.metrics.forEach(function (x, i) { m.metricById[x.id] = x; m.metricOrder[x.id] = i; });
     data.entries.forEach(function (e) {
       var k = e.sessionId + "|" + e.personId;
-      (m.res[k] = m.res[k] || {})[e.metricId] = { value: e.value, goal: e.goal };
+      (m.res[k] = m.res[k] || {})[e.metricId] = { value: e.value, goal: e.goal, weight: e.weight || 1 };
     });
     return m;
   }
@@ -62,10 +62,13 @@ window.DH = (function () {
     return function (a, b) { return (m.metricOrder[a] || 0) - (m.metricOrder[b] || 0); };
   }
 
-  // Everything logged added up, divided by every goal added up (uncapped).
+  // Everything logged added up, divided by every goal added up, each times its metric's weight.
   function pctOf(lines) {
     var v = 0, g = 0;
-    lines.forEach(function (l) { if (l.goal > 0) { v += l.value; g += l.goal; } });
+    lines.forEach(function (l) {
+      var w = l.weight || 1;
+      if (l.goal > 0) { v += l.value * w; g += l.goal * w; }
+    });
     return g > 0 ? Math.round(100 * v / g) : null;
   }
 
@@ -83,7 +86,7 @@ window.DH = (function () {
       if (!counted.length) return;
       n++;
       counted.forEach(function (mid) {
-        var a = agg[mid] || (agg[mid] = { metricId: mid, value: 0, goal: 0 });
+        var a = agg[mid] || (agg[mid] = { metricId: mid, value: 0, goal: 0, weight: e[mid].weight || 1 });
         a.value += e[mid].value; a.goal += e[mid].goal;
       });
     });
@@ -93,14 +96,15 @@ window.DH = (function () {
   }
 
   // A person's current goals with nothing logged yet, so the board can show targets before anyone logs.
-  function goalsOnly(p) {
+  function metricWeight(m, id) { return (m.metricById[id] && m.metricById[id].weight) || 1; }
+  function goalsOnly(m, p) {
     var lines = p.metrics.filter(function (a) { return a.goal > 0; }).map(function (a) {
-      return { metricId: a.metricId, value: 0, goal: a.goal };
+      return { metricId: a.metricId, value: 0, goal: a.goal, weight: metricWeight(m, a.metricId) };
     });
     return lines.length ? { lines: lines, pct: 0, sessions: 0, empty: true } : null;
   }
   function scoreOrGoals(m, p, sid) {
-    return score(m, p.id, sid) || (p.active ? goalsOnly(p) : null);
+    return score(m, p.id, sid) || (p.active ? goalsOnly(m, p) : null);
   }
 
   // Everyone with goals is ranked; people who haven't logged yet show their goals at 0% after everyone else.
@@ -137,7 +141,7 @@ window.DH = (function () {
     var t = {};
     logged.forEach(function (r) {
       r.s.lines.forEach(function (l) {
-        var a = t[l.metricId] || (t[l.metricId] = { metricId: l.metricId, value: 0, goal: 0, people: [] });
+        var a = t[l.metricId] || (t[l.metricId] = { metricId: l.metricId, value: 0, goal: 0, weight: l.weight || 1, people: [] });
         a.value += l.value; a.goal += l.goal; a.people.push({ p: r.p, value: l.value });
       });
     });
@@ -202,7 +206,7 @@ window.DH = (function () {
 
   return {
     esc: esc, avatar: avatar, fmtDate: fmtDate, todayISO: todayISO, model: model, entry: entry,
-    metricColor: metricColor, metricName: metricName, pctOf: pctOf, score: score, scoreOrGoals: scoreOrGoals, rank: rank,
+    metricColor: metricColor, metricName: metricName, metricWeight: metricWeight, pctOf: pctOf, score: score, scoreOrGoals: scoreOrGoals, rank: rank,
     history: history, streak: streak, teamTotals: teamTotals, pooledPct: pooledPct, winners: winners,
     photoUrl: photoUrl, compressImage: compressImage, api: api
   };

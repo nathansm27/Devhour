@@ -124,7 +124,7 @@
     var top = r.logged.filter(function (x) { return x.s.pct > 0; }).slice(0, 3);
     h += top.length ? podiumHTML(top) : '<div style="height:24px"></div>';
     h += boardHTML(r);
-    h += '<p class="foot">Each score is everything a person logged added up against their own goals added up. The line under each row fills at 100%. Tap your name to log your numbers.</p>';
+    h += '<p class="foot">Each score is everything a person logged added up against their own goals added up, with metrics marked \u00d7 counting for more. The line under each row fills at 100%. Tap your name to log your numbers.</p>';
     var main = $("main");
     main.className = intro ? "intro" : "";
     main.innerHTML = h;
@@ -170,11 +170,13 @@
     return h + "</section>";
   }
 
+  // Shown next to a metric that counts for more than one.
+  function wx(w) { return w > 1 ? '<span class="wx">\u00d7' + w + "</span>" : ""; }
   function lineHTML(l, extra) {
     var met = l.goal > 0 && l.value >= l.goal;
     return '<span class="' + (met ? "hit " : "") + (extra ? "extra" : "") + '"><i class="dot" style="background:' + D.metricColor(m, l.metricId) + '"></i>' +
       '<span><b class="num">' + l.value + "</b>" + (l.goal ? '<span class="num">/' + l.goal + "</span>" : "") +
-      '<span class="lbl"> ' + esc(D.metricName(m, l.metricId)) + "</span></span>" +
+      '<span class="lbl"> ' + esc(D.metricName(m, l.metricId)) + "</span>" + wx(l.weight) + "</span>" +
       (met ? '<span class="up" aria-label="goal met">\u25B2</span>' : "") + "</span>";
   }
 
@@ -226,7 +228,7 @@
     if (tiles.length) {
       h += '<ul class="pills">' + tiles.map(function (t) {
         return '<li class="prow fill"><span class="pk"><i class="dot" style="background:' + D.metricColor(m, t.metricId) + '"></i><span class="pn-t">' +
-          esc(D.metricName(m, t.metricId)) + '</span></span><span class="pv num">' + t.value + (t.goal ? " <small>/ " + t.goal + "</small>" : "") + "</span></li>";
+          esc(D.metricName(m, t.metricId)) + "</span>" + wx(t.weight) + '</span><span class="pv num">' + t.value + (t.goal ? " <small>/ " + t.goal + "</small>" : "") + "</span></li>";
       }).join("") + "</ul>";
     }
 
@@ -404,7 +406,7 @@
     mets.forEach(function (a) {
       var v = e[a.metricId] ? e[a.metricId].value : "";
       var name = D.metricName(m, a.metricId);
-      h += '<div class="lrow"><span class="ln"><i class="dot" style="background:' + D.metricColor(m, a.metricId) + '"></i><span class="pn-t">' + esc(name) + "</span></span>" +
+      h += '<div class="lrow"><span class="ln"><i class="dot" style="background:' + D.metricColor(m, a.metricId) + '"></i><span class="pn-t">' + esc(name) + "</span>" + wx(D.metricWeight(m, a.metricId)) + "</span>" +
         '<span class="lg">/ ' + a.goal + "</span>" +
         '<div class="stepper"><button type="button" id="dn-' + a.metricId + '" data-step="-1" data-m="' + a.metricId + '" aria-label="One less ' + esc(name) + '">\u2212</button>' +
         '<input class="field" type="number" inputmode="numeric" min="0" step="1" id="lv-' + a.metricId + '" data-lv="' + a.metricId + '" value="' + v + '" aria-label="' + esc(name) + '" placeholder="0">' +
@@ -496,7 +498,7 @@
       h += s.lines.map(function (l) {
         var w = l.goal ? Math.min(l.value / l.goal, 1) * 100 : 0, col = D.metricColor(m, l.metricId);
         return '<div class="mrow"><span class="l"><i class="dot" style="background:' + col + '"></i><span class="pn-t">' + esc(D.metricName(m, l.metricId)) +
-          '</span></span><span class="b"><i style="width:' + w.toFixed(1) + "%;background:" + col + '"></i></span><span class="v"><b>' + l.value + "</b>" +
+          "</span>" + wx(l.weight) + '</span><span class="b"><i style="width:' + w.toFixed(1) + "%;background:" + col + '"></i></span><span class="v"><b>' + l.value + "</b>" +
           (l.goal ? " <small>/ " + l.goal + "</small>" : "") + "</span></div>";
       }).join("");
     }

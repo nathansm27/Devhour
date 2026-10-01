@@ -185,7 +185,7 @@
     if (!cur) return h + '<div class="empty-note">Create your first session to start logging results.</div></section>';
     var s = m.desc.filter(function (x) { return x.id === cur; })[0];
     h += '<div class="bar"><label>Date <input class="field" type="date" id="sessionDate" value="' + esc(s.date) + '"></label>' +
-      '<button class="btn quiet" data-act="refresh-goals" title="Apply everyone\u2019s current goals to this session">Use current goals</button>' +
+      '<button class="btn quiet" data-act="refresh-goals" title="Apply everyone\u2019s current goals and weights to this session">Use current goals</button>' +
       '<button class="btn quiet danger" data-act="del-session">Delete session</button></div>';
     h += photoBox(s);
 
@@ -223,7 +223,7 @@
   }
 
   function metricsPanel() {
-    var h = '<section class="panel"><h2>Metrics</h2><p class="hint">This team\u2019s list of things to track. The default goal is used when you give a metric to someone new.</p>';
+    var h = '<section class="panel"><h2>Metrics</h2><p class="hint">This team\u2019s list of things to track. The default goal is used when you give a metric to someone new. Weight is how much one counts: leave it at 1 unless something is worth more, say a client meeting at 5.</p>';
     if (m.metrics.length) {
       h += '<div class="mlist">';
       m.metrics.forEach(function (x) {
@@ -232,6 +232,7 @@
           '<input class="field" type="text" maxlength="40" id="mn-' + x.id + '" data-mname="' + x.id + '" aria-label="Metric name" value="' + esc(x.name) + '">' +
           '<span class="mcount">' + users + (users === 1 ? " person" : " people") + "</span>" +
           '<label class="mdef"><span>Goal</span>' + numInput('id="md-' + x.id + '" data-mdef="' + x.id + '"', x.defaultGoal || 0, x.name + " default goal") + "</label>" +
+          '<label class="mdef"><span>Weight</span>' + numInput('id="mw-' + x.id + '" data-mweight="' + x.id + '"', x.weight || 1, x.name + " weight") + "</label>" +
           '<button class="iconbtn" data-act="del-metric" data-id="' + x.id + '" aria-label="Delete ' + esc(x.name) + '" title="Delete">' + ICON.trash + "</button></div>";
       });
       h += "</div>";
@@ -371,6 +372,13 @@
       m.metricById[mid].defaultGoal = dg;
       debounce("md|" + mid, function () {
         track(call("/api/admin/metrics/" + mid, "PATCH", { defaultGoal: dg })).catch(function () {});
+      });
+    } else if (t.hasAttribute("data-mweight")) {
+      mid = t.getAttribute("data-mweight");
+      var wv = Math.min(100, Math.max(1, readInt(t.value) || 1));
+      m.metricById[mid].weight = wv;
+      debounce("mw|" + mid, function () {
+        track(call("/api/admin/metrics/" + mid, "PATCH", { weight: wv })).catch(function () {});
       });
     } else if (t.hasAttribute("data-name")) {
       pid = t.getAttribute("data-name");

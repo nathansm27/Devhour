@@ -116,6 +116,7 @@
 .sub .up { color: var(--win); font-size: .5625rem; }
 .sub .hit b { color: var(--win); }
 .sub .lbl { color: var(--faint); }
+.wx { margin-left: 5px; padding: 1px 5px; border-radius: 5px; background: var(--brand-soft); color: var(--brand-ink); font-size: .6875rem; font-weight: 700; white-space: nowrap; }
 .sub .more-sm { display: none; color: var(--muted); font-weight: 600; }
 .sc { text-align: right; display: flex; align-items: baseline; gap: 8px; }
 .sc small { color: var(--faint); font-size: .6875rem; }
