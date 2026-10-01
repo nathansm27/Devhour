@@ -542,6 +542,8 @@ async function admin(request, sql, parts) {
       const defaultGoal = body.defaultGoal !== undefined ? cleanCount(body.defaultGoal) : metric.default_goal;
       const weight = body.weight !== undefined ? cleanWeight(body.weight) : metric.weight;
       await sql`UPDATE dh_metrics SET name = ${name}, default_goal = ${defaultGoal}, weight = ${weight} WHERE id = ${id}`;
+      // A weight is a scoring rule rather than a target, so it applies to everything already logged too.
+      if (weight !== metric.weight) await sql`UPDATE dh_entries SET weight = ${weight} WHERE metric_id = ${id}`;
       return json({ id, name, defaultGoal, weight });
     }
     if (method === "DELETE") {
@@ -585,6 +587,11 @@ async function admin(request, sql, parts) {
         const goal = cleanCount(body.goal);
         await sql`INSERT INTO dh_person_metrics (person_id, metric_id, goal) VALUES (${id}, ${metricId}, ${goal})
                   ON CONFLICT (person_id, metric_id) DO UPDATE SET goal = EXCLUDED.goal`;
+        // Apply straight away to sessions that haven't been and gone; past sessions keep the goal they had.
+        await sql`UPDATE dh_entries e SET goal = ${goal}
+                  FROM dh_sessions s
+                  WHERE s.id = e.session_id AND e.person_id = ${id} AND e.metric_id = ${metricId}
+                    AND s.date >= ${londonToday()}`;
         return json({ personId: id, metricId, goal });
       }
       if (method === "DELETE") {

@@ -61,9 +61,9 @@ The database tables are created automatically on the first request.
   - You add them in admin (Log results), or the session's winner adds them from the Winners tab using their PIN.
   - Photos are shrunk in the browser (about 150 KB) and stored in the database.
 - **Scoring:** a person's score is everything they logged added up, divided by their goals added up, with each metric multiplied by its weight.
-- **Weights:** every metric has a weight, 1 by default. Raise it (e.g. a client meeting at 5) to make it count for more. A metric's weight is saved with each number when it's logged, so past sessions keep the weights they had; "Use current goals" re-applies current goals and weights to a session.
+- **Weights:** every metric has a weight, 1 by default. Raise it (e.g. a client meeting at 5) to make it count for more. Changing a weight applies to every session immediately, past ones included, since it is a scoring rule rather than a target.
 - **Team %:** the same, across everyone.
-- **Goals and history:** goals are copied onto each number when it's first logged, so changing a goal later doesn't rewrite past sessions. "Use current goals" re-applies everyone's current goals to one session.
+- **Goals and history:** changing someone's goal updates today's and any future session straight away; sessions already past keep the goals they had. "Use current goals" re-applies everyone's current goals to one session.
 - **Removing things:**
   - Removing a metric from one person keeps their past numbers.
   - Deleting a metric removes it, and its numbers, for everyone.

@@ -223,7 +223,7 @@
   }
 
   function metricsPanel() {
-    var h = '<section class="panel"><h2>Metrics</h2><p class="hint">This team\u2019s list of things to track. The default goal is used when you give a metric to someone new. Weight is how much one counts: leave it at 1 unless something is worth more, say a client meeting at 5.</p>';
+    var h = '<section class="panel"><h2>Metrics</h2><p class="hint">This team\u2019s list of things to track. The default goal is used when you give a metric to someone new. Weight is how much one counts: leave it at 1 unless something is worth more, say a client meeting at 5. Changing a weight updates every session straight away.</p>';
     if (m.metrics.length) {
       h += '<div class="mlist">';
       m.metrics.forEach(function (x) {
@@ -250,7 +250,7 @@
   function teamPanel() {
     var active = m.people.filter(function (p) { return p.active; });
     var archived = m.people.filter(function (p) { return !p.active; });
-    var h = '<section class="panel"><h2>Team</h2><p class="hint">Each person can have their own metrics and goals. Give each person their PIN so they can log their own numbers by tapping their name on the leaderboard.</p>';
+    var h = '<section class="panel"><h2>Team</h2><p class="hint">Each person can have their own metrics and goals. Changing a goal updates today\u2019s and future sessions straight away; past sessions keep the goals they had. Give each person their PIN so they can log their own numbers by tapping their name on the leaderboard.</p>';
     if (active.length) {
       h += '<div class="cards">';
       active.forEach(function (p) {
